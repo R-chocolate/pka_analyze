@@ -3,10 +3,15 @@ import re
 from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 import google.generativeai as genai
+from fastapi.responses import FileResponse
 from Decipher.pt_crypto import decrypt_pkt
 
 # 1. 初始化
 app = FastAPI()
+
+@app.get("/")
+async def read_index():
+    return FileResponse('index.html')
 
 # 強制開啟 CORS，否則 Vercel 會連不進來
 app.add_middleware(

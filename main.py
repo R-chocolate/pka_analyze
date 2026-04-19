@@ -59,7 +59,7 @@ async def analyze_pka(file: UploadFile = File(...)):
              return {"status": "error", "message": "已定位到 Network 區塊，但內部沒有任何指令標籤"}
 
         # E. 呼叫 Gemini 整理
-        prompt = f"你是一個專業 Cisco 教官，請將以下原始指令按 hostname 分類，並依正確順序排列成乾淨的配置腳本：\n\n{all_cmds_text}"
+        prompt = f"你是一個專業 Cisco 教官，請將以下指令按 hostname 分類排列。請務必移除所有 '!' 符號。請使用 '------' 作為不同設備間的分隔線，並適度換行確保條理清晰。僅輸出純淨的配置標題與腳本內容，不要包含多餘的 Markdown 標記或問候語。\n\n{all_cmds_text}"
         response = model.generate_content(prompt)
         
         return {"status": "success", "data": response.text}

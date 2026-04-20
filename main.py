@@ -78,20 +78,20 @@ async def analyze_pka(file: UploadFile = File(...)):
              print("錯誤: 找不到任何指令內容")
              return {"status": "error", "message": "無法在檔案中定位到任何有效的配置指令標籤"}
 
-        # D. 提示詞微調：針對 4.1.3.5 與 IPv6/IPv4 混合實驗優化
+        # D. 提示詞微調：回歸通用高強度模式，適配所有實驗類型
         prompt = f"""
-        你是一位 Cisco CCIE 專家。我提供了從特殊 PKA 結構中提取的原始配置。
+        你是一位 Cisco CCIE 專家。我提供了從 PKA 結構中提取出的原始配置流。
         
         ### 任務：
-        1. 【精確分類】：請根據 `hostname` 指令以及我的 `BLOCK_TYPE` 標記，將配置重新整理為 ## [HOSTNAME] (例：## R1, ## S1)。
-        2. 【指令完整性】：請確保配置的連續性，特別注意 4.1.3.5 實驗中 R1 的 IPv4 (G0/0, G0/1) 和 R2 的 IPv6 地址 (G0/0, G0/1) 等細節，嚴禁遺漏。
-        3. 【Range 壓縮】：多個相同配置的連續介面必須合併為 `interface range` 以提高可讀性。
-        4. 【精簡輸出】：移除所有 '!' 與系統冗餘行 (如 version, service timestamps 等)。
+        1. 【精確分類】：根據 `hostname` 指令和 `BLOCK_TYPE` 標籤，將配置重新整理為 ## [HOSTNAME]。
+        2. 【指令完整性】：確保所有核心配置完整。特別注意路由器子介面 (sub-interfaces)、IPv4/IPv6 雙疊加配置、靜態路由與封裝指令，嚴禁截斷或省略。
+        3. 【Range 壓縮】：所有配置完全相同的連續介面必須合併為 `interface range` 指令，大幅提高可讀性。
+        4. 【專業整理】：移除所有 '!' 與冗餘系統行 (如 version, timestamp, service timestamps 等)。
 
-        ### 格式要求：
+        ### 輸出格式：
         - 標題：## [HOSTNAME]
         - 設備間分隔線：'------'
-        - 僅輸出純淨 CLI 指令，嚴禁 Markdown 區塊外的解釋。
+        - 僅輸出純淨的 CLI 指令，嚴禁 Markdown 區塊外的文字解釋。
 
         原始數據：
         {all_cmds_text}

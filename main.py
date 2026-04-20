@@ -66,25 +66,23 @@ async def analyze_pka(file: UploadFile = File(...)):
         raw_xml_data = decrypt_pkt(pka_bytes)
         content = raw_xml_data.decode('utf-8', errors='ignore')
 
-        # A. 數據脫水 (保持基本清理)
+        # A. 數據脫水
         content = re.sub(r'<(PIXMAPBANK|GUI_DATA|SESSION_DATA)>.*?</\1>', '', content, flags=re.DOTALL | re.IGNORECASE)
 
         # B. 高性能線性提取
         device_data = {} # {name: [lines]}
-        seen_configs = set() # 用於防止完全重複的配置塊 (如 Running 與 Startup 相同時)
+        seen_configs = set()
 
         # 1. 提取所有配置標籤
         for tag in ["RUNNINGCONFIG", "STARTUPCONFIG", "IOS_CONFIG"]:
             configs = fast_extract_tags(content, tag)
             for config_body in configs:
-                # 區塊級去重：如果這個配置內容完全看過了，就不重複處理
                 config_hash = hash(config_body)
                 if config_hash in seen_configs: continue
                 seen_configs.add(config_hash)
 
-                # 定位主人
                 body_pos = content.find(config_body)
-                lookback = content[max(0, body_pos-30000) : body_pos]
+                lookback = content[max(0, body_pos-40000) : body_pos]
                 name_match = re.findall(r'<(SYS_NAME|NAME)[^>]*?>(.*?)</\1>', lookback, re.IGNORECASE | re.DOTALL)
                 dev_name = clean_xml_tag(name_match[-1][1]) if name_match else "Unknown"
                 
@@ -93,11 +91,11 @@ async def analyze_pka(file: UploadFile = File(...)):
                 lines = re.findall(r'<LINE>(.*?)</LINE>', config_body, re.DOTALL | re.IGNORECASE)
                 for l in lines:
                     l_clean = clean_xml_tag(l)
-                    # 預過濾掉完全沒用的噪音，但保留結構指令
+                    # 預先清理 Cisco 系統訊息
                     if l_clean and l_clean != "!" and not l_clean.startswith("Building configuration"):
                         device_data[dev_name].append(l_clean)
 
-        # 2. 提取 PC/Server 屬性
+        # 2. 提取 PC/Server 靜態屬性
         device_blocks = fast_extract_tags(content, "DEVICE")
         for dev_block in device_blocks:
             n_match = re.search(r'<(SYS_NAME|NAME)[^>]*?>(.*?)</\1>', dev_block, re.IGNORECASE | re.DOTALL)
@@ -109,12 +107,11 @@ async def analyze_pka(file: UploadFile = File(...)):
                 for v in vals:
                     v_clean = clean_xml_tag(v)
                     if v_clean and v_clean != "0.0.0.0" and len(v_clean) > 2:
-                        # 標註這是靜態設定，避免與 CLI 混淆
                         info = f"[Static] {tag}: {v_clean}"
                         if info not in device_data[name]:
                             device_data[name].append(info)
 
-        # C. 數據整合 (移除不合理的「行級去重」，因為 no shutdown 等指令可能會重複出現)
+        # C. 數據彙整
         extracted_blocks = []
         for dev, lines in device_data.items():
             if lines:
@@ -123,25 +120,41 @@ async def analyze_pka(file: UploadFile = File(...)):
         all_cmds_text = "\n\n".join(extracted_blocks)
         
         if not all_cmds_text:
-             return {"status": "error", "message": "無法在檔案中定位到任何配置"}
+             return {"status": "error", "message": "無法在檔案中定位到任何有效的配置"}
 
-        # D. 提示詞恢復：CCIE 專家強度
+        # D. 應用萬用 Prompt
         prompt = f"""
-        你是一位 Cisco CCIE 專家，現在正在審核一份 Packet Tracer 實驗的配置數據。
-        
-        ### 任務：
-        1. 【精確整理】：根據 `DEVICE` 標記整理配置，輸出格式為 ## [HOSTNAME]。
-        2. 【完整性守護】：這是一項極其嚴肅的任務。必須確保 4.1.3.5 等實驗中的 IPv4/IPv6、子介面配置、封裝格式 (encapsulation dot1Q) 以及關鍵的路由協議 (OSPF/EIGRP) 完整無缺。**嚴禁漏掉任何一行介面指令。**
-        3. 【PC 定址】：如果數據包含 `[Static]` 開頭的定址資訊，請在該設備標題下優先列出。
-        4. 【Range 合併】：多個相同配置的連續介面，必須合併為 `interface range` 以提升腳本可讀性。
-        5. 【精簡雜訊】：移除所有單獨的 '!'、version 號、timestamps 等不屬於實驗要求的垃圾訊息。
+        你是一位 Cisco CCIE 專家，負責將 PKA 原始數據整理為標準化的配置腳本。
+        請根據以下「功能類別清單」檢查並整理原始數據，不得遺漏任何關鍵配置。
 
-        ### 輸出格式：
-        - 標題：## [HOSTNAME]
-        - 分隔線：'------'
-        - 僅輸出純淨 CLI 指令，嚴禁在 Markdown 區塊外進行任何文字說明或解釋。
+        ### 🚨 1. 設備基本管理與安全:
+        - 掃描並保留：`hostname`, `enable secret`, `service password-encryption`, `no ip domain-lookup`。
+        - 保留 Banner：`banner motd` 及其內容。
+        - 管理最佳化：`logging synchronous`, `exec-timeout 6 0`。
 
-        原始數據：
+        ### 🔐 2. SSH 遠端存取與認證:
+        - 必須提取：`ip domain-name`, `crypto key generate rsa` (通常為 1024), `username ... secret ...`。
+        - 線路配置：`line vty 0 15` 下的 `login local` 與 `transport input ssh`。
+
+        ### 🏗️ 3. 第二層交換優化:
+        - 【強制限令】：凡是「配置完全相同」的連續介面，必須合併為 `interface range` (例如 range F0/1 - 24) 以節省空間。
+        - 保留設定：VLAN 創建、`switchport access vlan`, `switchport mode trunk`, `switchport trunk native vlan`。
+        - STP 防護：`spanning-tree portfast`, `spanning-tree bpduguard enable`。
+
+        ### 🛣️ 4. 第三層路由與定址:
+        - 介面配置：所有的 IPv4/IPv6 `ip address`、`description`、`no shutdown`。
+        - 子介面 (Router-on-a-stick)：`interface G0/0.10` 的 `encapsulation dot1Q` 配置。
+        - 路由協議：`router ospf`, `network` 宣告, `ip route` 靜態路由, `ipv6 unicast-routing`。
+
+        ### 📦 5. 網路服務:
+        - 保留 DHCP：`ip dhcp pool`, `network`, `default-router`, `dns-server`, `excluded-address`。
+
+        ### 📋 格式要求：
+        - 每個設備使用 ## [HOSTNAME] 作為大標題。
+        - 移除所有 '!' 符號。
+        - 僅輸出 CLI 腳本，嚴禁任何解釋或問候。
+
+        原始數據流：
         {all_cmds_text}
         """
 

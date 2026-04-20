@@ -58,41 +58,37 @@ async def analyze_pka(file: UploadFile = File(...)):
         if not all_cmds_text:
              return {"status": "error", "message": "已定位到 Network 區塊，但內部沒有任何指令標籤"}
 
-        # E. 呼叫 Gemini 整理 (萬用模式識別與壓縮 Prompt)
+        # E. 呼叫 Gemini 整理 (加入設備存活檢查與防截斷指令)
         prompt = f"""
-        你是一位 Cisco 網路架構師。請解析以下原始數據，並生成一份乾淨、完整且高效的配置清單。
+        你是一位 Cisco 專家。這是一份從 PKA XML 中提取的原始數據流。
+        
+        ### 🚨 重要：強制性完整輸出要求
+        1. 【主機清查】：首先掃描原始數據中出現的所有不同 'hostname'（例如 R1, S1, ISP 等）。
+        2. 【嚴禁截斷】：你必須完整輸出清查到的「每一台」主機配置。禁止因為內容重複或長度原因省略任何一台設備。
+        3. 【重點核對】：特別注意 R1（或路由器）的子介面 (sub-interfaces, 如 G0/1.10)，這些是 Inter-VLAN Routing 的核心答案，絕對不能漏掉。
 
-        ### 任務目標：
-        1. 【全設備掃描】：掃描數據中出現的所有 'hostname'。不論名稱為何，請確保每一台設備的配置都必須被完整輸出，嚴禁遺漏。
-        2. 【模式合併 (Range 邏輯)】：
-           - 掃描所有 interface 配置。若連續介面的配置參數（如 switchport mode, access vlan, port-security）完全相同，必須合併為 `interface range` 指令。
-           - 這是為了提高輸出效率並縮短長度，確保所有主機都能被塞進輸出結果。
-        3. 【功能保留原則】：根據 CCNA 標準教材（Unit 1-8），保留以下關鍵配置：
-           - [基礎]：enable secret, username, banner motd, line 密碼與 SSH 設定。
-           - [交換]：VLAN 創建與命名、Trunk 設定 (native vlan, allowed vlan)、STP (port-fast, root primary)。
-           - [路由]：所有子介面 (sub-interfaces)、encapsulation dot1Q、Static Route、動態路由宣告 (OSPF/RIP)。
-           - [服務]：DHCP Pool、Excluded-addresses、IP Default-gateway。
+        ### 🛠️ 高效合併與過濾規則 (Unit 1-8 標準):
+        - 【Range 合併】：所有配置完全相同的連續介面（如 Access Vlan 10, Port-fast）「必須」合併為 `interface range`。
+        - 【精簡顯示】：
+            - 排除所有 '!'、XML 標籤、標記、以及 version, timestamps 等系統預設指令。
+            - 排除狀態為 shutdown 且「完全沒有」任何 IP、VLAN 或描述設定的介面。
+        - 【功能保留】：保留 enable secret, banner motd, VLAN 命名, encapsulation dot1Q, Static Route, DHCP Pool, VTY SSH。
 
-        ### 排除規則 (Noise Filter)：
-        - 移除所有 '!' 與 XML 標籤。
-        - 移除 version, service timestamps, ip classless 等系統預設靜態指令。
-        - 移除狀態為 shutdown 且沒有任何特殊配置（無 IP, 無 VLAN）的介面。
+        ### 📋 輸出結構：
+        - 格式：## [HOSTNAME]
+        - 設備間分隔線：'------'
+        - 僅輸出 CLI 指令，嚴禁任何解釋或 Markdown 語法外的文字。
 
-        ### 輸出格式：
-        - 標題：'## [HOSTNAME]'。
-        - 分隔：設備間以 '------' 區隔。
-        - 僅輸出 CLI 指令，嚴禁任何解釋或 Markdown 代碼塊以外的廢話。
-
-        原始數據流：
+        原始數據：
         {all_cmds_text}
         """
 
-        # 增加 max_output_tokens 確保長度充足，temperature 設低確保精準度
+        # 這裡的 generation_config 是防止截斷的關鍵
         response = model.generate_content(
             prompt,
             generation_config={
                 "max_output_tokens": 4096,
-                "temperature": 0.1,
+                "temperature": 0, # 設為 0 以獲得最穩定、最不懶惰的結果
                 "top_p": 1
             }
         )

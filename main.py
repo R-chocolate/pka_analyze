@@ -82,7 +82,7 @@ async def analyze_pka(file: UploadFile = File(...)):
                 seen_configs.add(config_hash)
 
                 body_pos = content.find(config_body)
-                lookback = content[max(0, body_pos-40000) : body_pos]
+                lookback = content[max(0, body_pos-50000) : body_pos]
                 name_match = re.findall(r'<(SYS_NAME|NAME)[^>]*?>(.*?)</\1>', lookback, re.IGNORECASE | re.DOTALL)
                 dev_name = clean_xml_tag(name_match[-1][1]) if name_match else "Unknown"
                 
@@ -91,11 +91,11 @@ async def analyze_pka(file: UploadFile = File(...)):
                 lines = re.findall(r'<LINE>(.*?)</LINE>', config_body, re.DOTALL | re.IGNORECASE)
                 for l in lines:
                     l_clean = clean_xml_tag(l)
-                    # 預先清理 Cisco 系統訊息
+                    # 預先清理真正的系統垃圾，保留所有指令
                     if l_clean and l_clean != "!" and not l_clean.startswith("Building configuration"):
                         device_data[dev_name].append(l_clean)
 
-        # 2. 提取 PC/Server 靜態屬性
+        # 2. 提取 PC/Server 靜態屬性 (補上定址資訊)
         device_blocks = fast_extract_tags(content, "DEVICE")
         for dev_block in device_blocks:
             n_match = re.search(r'<(SYS_NAME|NAME)[^>]*?>(.*?)</\1>', dev_block, re.IGNORECASE | re.DOTALL)
@@ -107,7 +107,7 @@ async def analyze_pka(file: UploadFile = File(...)):
                 for v in vals:
                     v_clean = clean_xml_tag(v)
                     if v_clean and v_clean != "0.0.0.0" and len(v_clean) > 2:
-                        info = f"[Static] {tag}: {v_clean}"
+                        info = f"ip address {tag}: {v_clean}" # 偽裝成指令讓 AI 統一整理
                         if info not in device_data[name]:
                             device_data[name].append(info)
 
@@ -122,35 +122,23 @@ async def analyze_pka(file: UploadFile = File(...)):
         if not all_cmds_text:
              return {"status": "error", "message": "無法在檔案中定位到任何有效的配置"}
 
-        # D. 應用強制執行版萬用 Prompt
+        # D. 高保真通用 Prompt 邏輯：只分組與去噪音，不准刪除指令
         prompt = f"""
-        你是一位 Cisco CCIE 專業教官。請解析原始 PKA 數據，並將其整理為標準化、可直接執行的配置腳本。
+        你是一位 Cisco 網路配置整理專家。你的唯一任務是將提供的原始數據流整理為乾淨、分組明確的 CLI 腳本。
         
-        ### 🚨 強制執行規則 (不可遺漏任何一項)：
-        1. 【設備身分識別】：
-           - 必須提取 `hostname`、`ip domain-name` (例如 ccna-lab.com)。
-           - 必須保留 `username ... secret ...` 使用者帳號指令。
-           - 必須包含 `crypto key generate rsa` 並註明係數 (如 1024)。
-        
-        2. 【安全與管理加固】：
-           - 必須包含 `enable secret`、`service password-encryption` 與 `no ip domain-lookup`。
-           - 必須包含 `banner motd` 法律聲明內容。
-           - Line 設定：Console 與 VTY 必須包含 `exec-timeout 6 0` 與 `logging synchronous`。
-           - SSH 設定：VTY 線路必須包含 `login local` 與 `transport input ssh`。
+        ### 核心指導原則 (高保真模式)：
+        1. 【絕對完整】：原始數據流中只要是合法的 Cisco CLI 指令（如 ip address, hostname, interface, router 等），**必須 100% 保留**。嚴禁根據自己的判斷刪除指令。
+        2. 【設備分組】：根據 `DEVICE` 標記將指令歸類到 ## [HOSTNAME] 下。
+        3. 【去除噪音】：僅移除 `!` 符號、`version 15.1` 等系統版本資訊、時間戳以及 `Building configuration` 等報文。
+        4. 【Range 合併】：為了美觀，凡是「配置完全相同」的連續介面，請合併為 `interface range` 指令。
+        5. 【定址資訊】：如果看到 `ip address IP_ADDRESS:` 等靜態資訊，請將其轉換為可讀的位址描述放在對應設備下。
 
-        3. 【交換機優化 (Range 邏輯)】：
-           - 凡是「配置完全相同」的連續埠口，務必合併為 `interface range` 指令，嚴禁逐行輸出。
-        
-        4. 【路由與定址】：
-           - 完整保留所有實體介面、子介面 (sub-interfaces) 的 IP 與封裝配置。
-           - 保留靜態路由 (`ip route`) 與動態路由協議 (如 `router ospf`)。
-
-        ### 📋 輸出格式：
+        ### 輸出格式：
         - 標題：## [HOSTNAME]
         - 分隔：設備間以 '------' 分隔。
-        - 移除所有 '!' 符號，僅保留 CLI 指令。
+        - 嚴禁輸出任何 Markdown 代碼塊之外的解釋、問候或總結。
 
-        待處理原始數據流：
+        原始數據流：
         {all_cmds_text}
         """
 

@@ -66,7 +66,7 @@ async def analyze_pka(file: UploadFile = File(...)):
             # 將每個設備的指令獨立提取並打上分隔符號，強迫 AI 注意到不同設備
             processed_devices = []
             for block in device_blocks:
-                lines = re.findall(r'<LINE>(.*?)</LINE>', block, re.IGNORECASE | u.re.DOTALL)
+                lines = re.findall(r'<LINE>(.*?)</LINE>', block, re.IGNORECASE | re.DOTALL)
                 if lines:
                     clean_lines = [l.replace('&lt;', '<').replace('&gt;', '>').replace('&amp;', '&').strip() for l in lines]
                     processed_devices.append("\n".join(clean_lines))

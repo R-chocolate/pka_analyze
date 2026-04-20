@@ -40,22 +40,32 @@ async def analyze_pka(file: UploadFile = File(...)):
         content = re.sub(r'<PIXMAPBANK>.*?</PIXMAPBANK>', '', content, flags=re.DOTALL)
         content = re.sub(r'<GUI_DATA>.*?</GUI_DATA>', '', content, flags=re.DOTALL)
 
-        # C. 提取 Network 區塊 (修改版：合併所有區塊以防遺漏設備)
-        network_blocks = re.findall(r'<NETWORK.*?</NETWORK>', content, re.IGNORECASE | re.DOTALL)
+        # C. 升級版提取：改用 DEVICE 區塊掃描 (這是 Challenge 實驗的唯一解)
+        # 尋找所有設備塊，不論它在哪個 NETWORK 層級下
+        device_blocks = re.findall(r'<DEVICE.*?>.*?</DEVICE>', content, re.IGNORECASE | re.DOTALL)
         
-        if not network_blocks:
-            # 如果連標籤都找不到，回傳解密內容前 50 字偵錯
-            debug_info = content[:50].replace('<', '&lt;')
-            return {"status": "error", "message": f"無法解析 PKA 結構：找不到 NETWORK 標籤。解密開頭：{debug_info}"}
+        if not device_blocks:
+            # 備援機制：如果真的找不到 DEVICE，就退回原本的 Network 提取方式
+            network_blocks = re.findall(r'<NETWORK.*?</NETWORK>', content, re.IGNORECASE | re.DOTALL)
+            if not network_blocks:
+                # 如果連標籤都找不到，回傳解密內容前 50 字偵錯
+                debug_info = content[:50].replace('<', '&lt;')
+                return {"status": "error", "message": f"無法解析 PKA 結構：找不到 DEVICE 或 NETWORK 標籤。解密開頭：{debug_info}"}
+            answer_block = "\n".join(network_blocks)
+        else:
+            # 將每個設備的指令獨立提取並打上分隔符號，強迫 AI 注意到不同設備
+            processed_devices = []
+            for block in device_blocks:
+                lines = re.findall(r'<LINE>(.*?)</LINE>', block, re.IGNORECASE | re.DOTALL)
+                if lines:
+                    clean_lines = [l.replace('&lt;', '<').replace('&gt;', '>').replace('&amp;', '&').strip() for l in lines]
+                    processed_devices.append("\n".join(clean_lines))
             
-        # 關鍵修改：不只取 [-1]，我們取所有區塊並合併 (通常答案分布在最後 1-2 個 NETWORK 區塊)
-        # 合併所有 block，讓 AI 自己去判斷哪些是重複的
-        answer_block = "\n".join(network_blocks) 
-        
-        # D. 提取所有 LINE 指令 (這時會包含 R1, S1 等所有設備)
-        raw_lines = re.findall(r'<LINE>(.*?)</LINE>', answer_block, re.IGNORECASE | re.DOTALL)
-        clean_cmds = [l.replace('&lt;', '<').replace('&gt;', '>').replace('&amp;', '&') for l in raw_lines]
-        all_cmds_text = "\n".join(clean_cmds)
+            # 使用明確的分隔標記，防止 AI 忽視後方的設備配置
+            answer_block = "\n\n--- [NEXT_DEVICE_START] ---\n\n".join(processed_devices)
+
+        # D. 生成最終餵給 AI 的文字流
+        all_cmds_text = answer_block # 這裡已經包含所有設備的 LINE 了
         
         if not all_cmds_text:
              return {"status": "error", "message": "已定位到 Network 區塊，但內部沒有任何指令標籤"}

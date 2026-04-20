@@ -31,14 +31,19 @@ async def read_index():
 @app.post("/upload")
 async def analyze_pka(file: UploadFile = File(...)):
     try:
-        # A. 讀取並解密
+        print(f"收到檔案: {file.filename}")
+        # 步驟 1: 讀取並解密 
         pka_bytes = await file.read()
+        print("正在解密 PKA...")
         raw_xml_data = decrypt_pkt(pka_bytes)
         content = raw_xml_data.decode('utf-8', errors='ignore')
+        print(f"解密完成，長度: {len(content)}")
 
-        # B. 暴力脫水 (移除圖片與 GUI 雜訊，這是解析成功的關鍵)
+        # 步驟 2: 暴力脫水 (移除圖片與雜訊)
+        print("正在移除 XML 雜訊 (PIXMAP/GUI)...")
         content = re.sub(r'<PIXMAPBANK>.*?</PIXMAPBANK>', '', content, flags=re.DOTALL)
         content = re.sub(r'<GUI_DATA>.*?</GUI_DATA>', '', content, flags=re.DOTALL)
+        print(f"脫水完成，剩餘長度: {len(content)}")
 
         # C. 升級版提取：改用 DEVICE 區塊掃描 (這是 Challenge 實驗的唯一解)
         # 尋找所有設備塊，不論它在哪個 NETWORK 層級下
@@ -65,9 +70,11 @@ async def analyze_pka(file: UploadFile = File(...)):
             answer_block = "\n\n--- [NEXT_DEVICE_START] ---\n\n".join(processed_devices)
 
         # D. 生成最終餵給 AI 的文字流
-        all_cmds_text = answer_block # 這裡已經包含所有設備的 LINE 了
+        all_cmds_text = answer_block 
+        print(f"提取指令完成，準備傳送至 AI，總長度: {len(all_cmds_text)}")
         
         if not all_cmds_text:
+             print("錯誤: 找不到任何指令內容")
              return {"status": "error", "message": "已定位到 Network 區塊，但內部沒有任何指令標籤"}
 
         # E. 呼叫 Gemini 整理 (加入設備存活檢查與防遺漏指令)
@@ -100,6 +107,7 @@ async def analyze_pka(file: UploadFile = File(...)):
         """
 
         # 增加 max_output_tokens 以確保空間，temperature 設為 0 以保持穩定
+        print("正在等待 Gemini 回應...")
         response = model.generate_content(
             prompt,
             generation_config={
@@ -108,6 +116,7 @@ async def analyze_pka(file: UploadFile = File(...)):
                 "top_p": 1
             }
         )
+        print("Gemini 分析完畢！")
         
         return {"status": "success", "data": response.text}
 

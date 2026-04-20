@@ -45,12 +45,17 @@
             border-radius: 6px;
             cursor: pointer;
             font-weight: 600;
-            transition: opacity 0.2s;
+            transition: all 0.2s;
         }
 
         #btnAnalyze {
             background: var(--primary);
             color: white;
+        }
+
+        #btnAnalyze:disabled {
+            background: #ccc;
+            cursor: not-allowed;
         }
 
         #btnDownload {
@@ -59,8 +64,9 @@
             display: none;
         }
 
-        button:hover {
+        button:hover:not(:disabled) {
             opacity: 0.9;
+            transform: translateY(-1px);
         }
 
         #result {
@@ -74,13 +80,25 @@
             line-height: 1.5;
             min-height: 100px;
             border: 1px solid #333;
+            overflow-x: auto;
         }
 
         .loading {
             color: var(--primary);
             font-weight: bold;
             display: none;
-            margin: 10px 0;
+            margin: 15px 0;
+            padding: 10px;
+            background: #e7f3ff;
+            border-radius: 6px;
+            border-left: 5px solid var(--primary);
+        }
+
+        .error-hint {
+            margin-top: 10px;
+            font-size: 13px;
+            color: #666;
+            display: none;
         }
     </style>
 </head>
@@ -93,8 +111,16 @@
             <button id="btnAnalyze" onclick="startAnalyze()">分析檔案</button>
             <button id="btnDownload" onclick="downloadTxt()">下載配置 (answer.txt)</button>
         </div>
-        <div id="loader" class="loading">正在聯繫雲端 AI 分析中...</div>
+        <div id="loader" class="loading">
+            <div>正在處理中...</div>
+            <div style="font-size: 12px; font-weight: normal; margin-top: 5px;">
+                (提示：大型 PKA 檔案可能需要 1-2 分鐘進行雲端 AI 分析，請稍候)
+            </div>
+        </div>
         <div id="result">尚未進行分析</div>
+        <div id="errorHint" class="error-hint">
+            ⚠️ 如果等待超過 3 分鐘仍未回應，請嘗試重新整理頁面並再次上傳。這可能是因為伺服器冷啟動或檔案過大導致的超時。
+        </div>
     </div>
 
     <script>
@@ -105,40 +131,57 @@
             const resEl = document.getElementById('result');
             const loadEl = document.getElementById('loader');
             const dlBtn = document.getElementById('btnDownload');
+            const analyzeBtn = document.getElementById('btnAnalyze');
+            const errorHint = document.getElementById('errorHint');
 
             if (!fileEl.files[0]) return alert("請先選擇 PKA 檔案！");
 
             const formData = new FormData();
             formData.append('file', fileEl.files[0]);
 
+            // UI 初始化
             loadEl.style.display = "block";
+            errorHint.style.display = "block";
             dlBtn.style.display = "none";
-            resEl.innerText = "";
+            analyzeBtn.disabled = true;
+            resEl.innerText = "分析中...";
             resEl.style.color = "#d4d4d4";
 
             try {
                 // Cloud Run Service URL
                 const GCP_URL = 'https://pka-analyze-653034698950.asia-east1.run.app/upload';
 
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 180000); // 3 分鐘超時
+
                 const response = await fetch(GCP_URL, {
                     method: 'POST',
-                    body: formData
+                    body: formData,
+                    signal: controller.signal
                 });
+                
+                clearTimeout(timeoutId);
                 const json = await response.json();
 
                 if (json.status === "success") {
                     lastResult = json.data;
                     resEl.innerText = lastResult;
                     dlBtn.style.display = "inline-block";
+                    errorHint.style.display = "none";
                 } else {
-                    resEl.innerText = "錯誤: " + json.message;
+                    resEl.innerText = "分析失敗: " + json.message;
                     resEl.style.color = "#ff6b6b";
                 }
             } catch (err) {
-                resEl.innerText = "連線後端失敗: " + err;
+                if (err.name === 'AbortError') {
+                    resEl.innerText = "錯誤: 請求超時 (超過 3 分鐘)。可能是檔案內容過多或網路連線不穩。";
+                } else {
+                    resEl.innerText = "連線後端失敗: " + err;
+                }
                 resEl.style.color = "#ff6b6b";
             } finally {
                 loadEl.style.display = "none";
+                analyzeBtn.disabled = false;
             }
         }
 

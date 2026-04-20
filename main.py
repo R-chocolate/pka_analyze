@@ -28,6 +28,11 @@ model = genai.GenerativeModel('gemini-3.1-flash-lite-preview')
 async def read_index():
     return FileResponse('index.html')
 
+@app.get("/ping")
+async def ping():
+    """用來給 Cloud Scheduler 定時敲醒伺服器用"""
+    return {"status": "alive"}
+
 @app.post("/upload")
 async def analyze_pka(file: UploadFile = File(...)):
     try:
@@ -61,7 +66,7 @@ async def analyze_pka(file: UploadFile = File(...)):
             # 將每個設備的指令獨立提取並打上分隔符號，強迫 AI 注意到不同設備
             processed_devices = []
             for block in device_blocks:
-                lines = re.findall(r'<LINE>(.*?)</LINE>', block, re.IGNORECASE | re.DOTALL)
+                lines = re.findall(r'<LINE>(.*?)</LINE>', block, re.IGNORECASE | u.re.DOTALL)
                 if lines:
                     clean_lines = [l.replace('&lt;', '<').replace('&gt;', '>').replace('&amp;', '&').strip() for l in lines]
                     processed_devices.append("\n".join(clean_lines))
@@ -88,7 +93,7 @@ async def analyze_pka(file: UploadFile = File(...)):
         - 強制要求：你必須輸出原始數據中出現過的「每一台」主機配置，嚴禁截斷或省略。
 
         ### 第二階段：指令壓縮與合併 (Unit 1-8 標準)
-        - 【Range 合併】：所有配置完全相同的連續介面（例如 F0/11-17 全是 Access VLAN 10），必須合併為 `interface range`。
+        - 【Range 合併】：所有配置完全相同的連續介面（例如 F0/11-17 全是 Access VLAN 10），必須合併為 `interface range`決策。
         - 【精簡噪音】：
             - 移除所有 '!' 符號與 XML 殘留標籤。
             - 移除 version, timestamps, ip classless 等系統自動生成的冗餘行。

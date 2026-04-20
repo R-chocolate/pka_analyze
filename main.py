@@ -73,7 +73,6 @@ async def analyze_pka(file: UploadFile = File(...)):
         device_data = {} # {name: [lines]}
         seen_configs = set()
 
-        # 1. 提取所有配置標籤
         for tag in ["RUNNINGCONFIG", "STARTUPCONFIG", "IOS_CONFIG"]:
             configs = fast_extract_tags(content, tag)
             for config_body in configs:
@@ -91,11 +90,11 @@ async def analyze_pka(file: UploadFile = File(...)):
                 lines = re.findall(r'<LINE>(.*?)</LINE>', config_body, re.DOTALL | re.IGNORECASE)
                 for l in lines:
                     l_clean = clean_xml_tag(l)
-                    # 預先清理真正的系統垃圾，保留所有指令
-                    if l_clean and l_clean != "!" and not l_clean.startswith("Building configuration"):
+                    # 預先清理真正的系統垃圾
+                    if l_clean and l_clean != "!" and not l_clean.startswith("Building configuration") and not l_clean.startswith("Current configuration"):
                         device_data[dev_name].append(l_clean)
 
-        # 2. 提取 PC/Server 靜態屬性 (補上定址資訊)
+        # 2. 提取 PC/Server 靜態屬性
         device_blocks = fast_extract_tags(content, "DEVICE")
         for dev_block in device_blocks:
             n_match = re.search(r'<(SYS_NAME|NAME)[^>]*?>(.*?)</\1>', dev_block, re.IGNORECASE | re.DOTALL)
@@ -107,7 +106,7 @@ async def analyze_pka(file: UploadFile = File(...)):
                 for v in vals:
                     v_clean = clean_xml_tag(v)
                     if v_clean and v_clean != "0.0.0.0" and len(v_clean) > 2:
-                        info = f"ip address {tag}: {v_clean}" # 偽裝成指令讓 AI 統一整理
+                        info = f"ip address {v_clean}"
                         if info not in device_data[name]:
                             device_data[name].append(info)
 
@@ -122,21 +121,26 @@ async def analyze_pka(file: UploadFile = File(...)):
         if not all_cmds_text:
              return {"status": "error", "message": "無法在檔案中定位到任何有效的配置"}
 
-        # D. 高保真通用 Prompt 邏輯：只分組與去噪音，不准刪除指令
+        # D. 參照指令表驅動 Prompt
         prompt = f"""
-        你是一位 Cisco 網路配置整理專家。你的唯一任務是將提供的原始數據流整理為乾淨、分組明確的 CLI 腳本。
+        你是一位 Cisco 網路專家。你的任務是從數據流中提取指令，並參考「核心指令指南」進行「有限判斷」的整理。
         
-        ### 核心指導原則 (高保真模式)：
-        1. 【絕對完整】：原始數據流中只要是合法的 Cisco CLI 指令（如 ip address, hostname, interface, router 等），**必須 100% 保留**。嚴禁根據自己的判斷刪除指令。
-        2. 【設備分組】：根據 `DEVICE` 標記將指令歸類到 ## [HOSTNAME] 下。
-        3. 【去除噪音】：僅移除 `!` 符號、`version 15.1` 等系統版本資訊、時間戳以及 `Building configuration` 等報文。
-        4. 【Range 合併】：為了美觀，凡是「配置完全相同」的連續介面，請合併為 `interface range` 指令。
-        5. 【定址資訊】：如果看到 `ip address IP_ADDRESS:` 等靜態資訊，請將其轉換為可讀的位址描述放在對應設備下。
+        ### 📖 核心指令指南 (出現相關關鍵字必須保留)：
+        1. 【管理與安全】：hostname, enable secret, service password-encryption, ip domain-name, crypto key, username secret, line vty, login local, logging synchronous, exec-timeout。
+        2. 【VLAN 與交換】：vlan (ID/Name), switchport mode (access/trunk), switchport access vlan, native vlan, nonegotiate, spanning-tree (portfast/bpduguard), port-security (maximum/sticky/violation)。
+        3. 【路由與定址】：interface (實體/子介面), encapsulation dot1q, ip address, ipv6 address, ipv6 unicast-routing, ip routing, ip route, router ospf, network。
+        4. 【進階服務】：ip dhcp pool, network, default-router, ip helper-address, ipv6 nd (managed-config-flag/other-config-flag)。
 
-        ### 輸出格式：
+        ### 🎯 有限判斷原則：
+        - 【優先保護】：只要原始數據中包含上述指南中的關鍵字，必須 100% 準確還原。
+        - 【去蕪存菁】：刪除所有 '!' 符號、系統 Banner、版本編號、時間戳以及 `Building configuration` 等廢話。
+        - 【介面歸類】：確保所有介面指令（如 ip address, description）精確歸類到對應的 ## [HOSTNAME] 下。
+        - 【連續合併】：相同的連續介面配置請合併為 `interface range` 指令。
+
+        ### 📋 格式規範：
         - 標題：## [HOSTNAME]
         - 分隔：設備間以 '------' 分隔。
-        - 嚴禁輸出任何 Markdown 代碼塊之外的解釋、問候或總結。
+        - 僅輸出 CLI 腳本，嚴禁任何解釋或問候語。
 
         原始數據流：
         {all_cmds_text}

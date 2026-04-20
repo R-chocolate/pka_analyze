@@ -122,39 +122,35 @@ async def analyze_pka(file: UploadFile = File(...)):
         if not all_cmds_text:
              return {"status": "error", "message": "無法在檔案中定位到任何有效的配置"}
 
-        # D. 應用萬用 Prompt
+        # D. 應用強制執行版萬用 Prompt
         prompt = f"""
-        你是一位 Cisco CCIE 專家，負責將 PKA 原始數據整理為標準化的配置腳本。
-        請根據以下「功能類別清單」檢查並整理原始數據，不得遺漏任何關鍵配置。
+        你是一位 Cisco CCIE 專業教官。請解析原始 PKA 數據，並將其整理為標準化、可直接執行的配置腳本。
+        
+        ### 🚨 強制執行規則 (不可遺漏任何一項)：
+        1. 【設備身分識別】：
+           - 必須提取 `hostname`、`ip domain-name` (例如 ccna-lab.com)。
+           - 必須保留 `username ... secret ...` 使用者帳號指令。
+           - 必須包含 `crypto key generate rsa` 並註明係數 (如 1024)。
+        
+        2. 【安全與管理加固】：
+           - 必須包含 `enable secret`、`service password-encryption` 與 `no ip domain-lookup`。
+           - 必須包含 `banner motd` 法律聲明內容。
+           - Line 設定：Console 與 VTY 必須包含 `exec-timeout 6 0` 與 `logging synchronous`。
+           - SSH 設定：VTY 線路必須包含 `login local` 與 `transport input ssh`。
 
-        ### 🚨 1. 設備基本管理與安全:
-        - 掃描並保留：`hostname`, `enable secret`, `service password-encryption`, `no ip domain-lookup`。
-        - 保留 Banner：`banner motd` 及其內容。
-        - 管理最佳化：`logging synchronous`, `exec-timeout 6 0`。
+        3. 【交換機優化 (Range 邏輯)】：
+           - 凡是「配置完全相同」的連續埠口，務必合併為 `interface range` 指令，嚴禁逐行輸出。
+        
+        4. 【路由與定址】：
+           - 完整保留所有實體介面、子介面 (sub-interfaces) 的 IP 與封裝配置。
+           - 保留靜態路由 (`ip route`) 與動態路由協議 (如 `router ospf`)。
 
-        ### 🔐 2. SSH 遠端存取與認證:
-        - 必須提取：`ip domain-name`, `crypto key generate rsa` (通常為 1024), `username ... secret ...`。
-        - 線路配置：`line vty 0 15` 下的 `login local` 與 `transport input ssh`。
+        ### 📋 輸出格式：
+        - 標題：## [HOSTNAME]
+        - 分隔：設備間以 '------' 分隔。
+        - 移除所有 '!' 符號，僅保留 CLI 指令。
 
-        ### 🏗️ 3. 第二層交換優化:
-        - 【強制限令】：凡是「配置完全相同」的連續介面，必須合併為 `interface range` (例如 range F0/1 - 24) 以節省空間。
-        - 保留設定：VLAN 創建、`switchport access vlan`, `switchport mode trunk`, `switchport trunk native vlan`。
-        - STP 防護：`spanning-tree portfast`, `spanning-tree bpduguard enable`。
-
-        ### 🛣️ 4. 第三層路由與定址:
-        - 介面配置：所有的 IPv4/IPv6 `ip address`、`description`、`no shutdown`。
-        - 子介面 (Router-on-a-stick)：`interface G0/0.10` 的 `encapsulation dot1Q` 配置。
-        - 路由協議：`router ospf`, `network` 宣告, `ip route` 靜態路由, `ipv6 unicast-routing`。
-
-        ### 📦 5. 網路服務:
-        - 保留 DHCP：`ip dhcp pool`, `network`, `default-router`, `dns-server`, `excluded-address`。
-
-        ### 📋 格式要求：
-        - 每個設備使用 ## [HOSTNAME] 作為大標題。
-        - 移除所有 '!' 符號。
-        - 僅輸出 CLI 腳本，嚴禁任何解釋或問候。
-
-        原始數據流：
+        待處理原始數據流：
         {all_cmds_text}
         """
 

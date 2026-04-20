@@ -58,9 +58,44 @@ async def analyze_pka(file: UploadFile = File(...)):
         if not all_cmds_text:
              return {"status": "error", "message": "已定位到 Network 區塊，但內部沒有任何指令標籤"}
 
-        # E. 呼叫 Gemini 整理
-        prompt = f"你是一個專業 Cisco 教官，請將以下指令按 hostname 分類排列。請務必移除所有 '!' 符號。請使用 '------' 作為不同設備間的分隔線，並適度換行確保條理清晰。僅輸出純淨的配置標題與腳本內容，不要包含多餘的 Markdown 標記或問候語。\n\n{all_cmds_text}"
-        response = model.generate_content(prompt)
+        # E. 呼叫 Gemini 整理 (萬用模式識別與壓縮 Prompt)
+        prompt = f"""
+        你是一位 Cisco 網路架構師。請解析以下原始數據，並生成一份乾淨、完整且高效的配置清單。
+
+        ### 任務目標：
+        1. 【全設備掃描】：掃描數據中出現的所有 'hostname'。不論名稱為何，請確保每一台設備的配置都必須被完整輸出，嚴禁遺漏。
+        2. 【模式合併 (Range 邏輯)】：
+           - 掃描所有 interface 配置。若連續介面的配置參數（如 switchport mode, access vlan, port-security）完全相同，必須合併為 `interface range` 指令。
+           - 這是為了提高輸出效率並縮短長度，確保所有主機都能被塞進輸出結果。
+        3. 【功能保留原則】：根據 CCNA 標準教材（Unit 1-8），保留以下關鍵配置：
+           - [基礎]：enable secret, username, banner motd, line 密碼與 SSH 設定。
+           - [交換]：VLAN 創建與命名、Trunk 設定 (native vlan, allowed vlan)、STP (port-fast, root primary)。
+           - [路由]：所有子介面 (sub-interfaces)、encapsulation dot1Q、Static Route、動態路由宣告 (OSPF/RIP)。
+           - [服務]：DHCP Pool、Excluded-addresses、IP Default-gateway。
+
+        ### 排除規則 (Noise Filter)：
+        - 移除所有 '!' 與 XML 標籤。
+        - 移除 version, service timestamps, ip classless 等系統預設靜態指令。
+        - 移除狀態為 shutdown 且沒有任何特殊配置（無 IP, 無 VLAN）的介面。
+
+        ### 輸出格式：
+        - 標題：'## [HOSTNAME]'。
+        - 分隔：設備間以 '------' 區隔。
+        - 僅輸出 CLI 指令，嚴禁任何解釋或 Markdown 代碼塊以外的廢話。
+
+        原始數據流：
+        {all_cmds_text}
+        """
+
+        # 增加 max_output_tokens 確保長度充足，temperature 設低確保精準度
+        response = model.generate_content(
+            prompt,
+            generation_config={
+                "max_output_tokens": 4096,
+                "temperature": 0.1,
+                "top_p": 1
+            }
+        )
         
         return {"status": "success", "data": response.text}
 

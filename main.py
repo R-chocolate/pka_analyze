@@ -37,101 +37,109 @@ def clean_xml_tag(text):
     if not text: return ""
     return text.replace('&lt;', '<').replace('&gt;', '>').replace('&amp;', '&').replace('&quot;', '"').replace('&apos;', "'").strip()
 
+def fast_extract_tags(content, tag_name):
+    """高效提取標籤內容，避開正則表達式的回溯問題"""
+    results = []
+    start_tag = f"<{tag_name}"
+    end_tag = f"</{tag_name}>"
+    
+    start_pos = 0
+    while True:
+        start_idx = content.find(start_tag, start_pos)
+        if start_idx == -1: break
+        
+        header_end = content.find('>', start_idx)
+        if header_end == -1: break
+        
+        end_idx = content.find(end_tag, header_end)
+        if end_idx == -1: break
+        
+        results.append(content[header_end + 1 : end_idx])
+        start_pos = end_idx + len(end_tag)
+    return results
+
 @app.post("/upload")
 async def analyze_pka(file: UploadFile = File(...)):
     try:
         print(f"收到檔案: {file.filename}")
         pka_bytes = await file.read()
-        print("正在解密 PKA...")
         raw_xml_data = decrypt_pkt(pka_bytes)
         content = raw_xml_data.decode('utf-8', errors='ignore')
-        print(f"解密完成，長度: {len(content)}")
 
-        # A. 深度脫水 (移除圖片與大量無用 Session 資料，防止 Regex 回溯失敗)
-        print("正在進行深度脫水...")
-        content = re.sub(r'<(PIXMAPBANK|GUI_DATA|SESSION_DATA|COMMAND_HISTORY)>.*?</\1>', '', content, flags=re.DOTALL | re.IGNORECASE)
-        print(f"脫水完成，剩餘長度: {len(content)}")
+        # A. 數據脫水 (保持基本清理)
+        content = re.sub(r'<(PIXMAPBANK|GUI_DATA|SESSION_DATA)>.*?</\1>', '', content, flags=re.DOTALL | re.IGNORECASE)
 
-        # B. 線性掃描與全設備解析邏輯
-        print("正在執行線性路徑掃描...")
+        # B. 高性能線性提取
         device_data = {} # {name: [lines]}
+        seen_configs = set() # 用於防止完全重複的配置塊 (如 Running 與 Startup 相同時)
 
-        # 策略 1：掃描所有配置塊 (RUNNINGCONFIG, STARTUPCONFIG, IOS_CONFIG)
-        config_blocks = re.finditer(r'<(RUNNINGCONFIG|STARTUPCONFIG|IOS_CONFIG)>(.*?)</\1>', content, re.DOTALL | re.IGNORECASE)
-        for match in config_blocks:
-            block_content = match.group(2)
-            # 向前回溯 30000 字元尋找最近的設備名稱
-            lookback_area = content[max(0, match.start()-30000) : match.start()]
-            name_match = re.findall(r'<(SYS_NAME|NAME)[^>]*?>(.*?)</\1>', lookback_area, re.IGNORECASE | re.DOTALL)
-            
-            dev_name = "Unknown_Device"
-            if name_match:
-                # 拿最後一個 (也就是最近的一個)
-                dev_name = clean_xml_tag(name_match[-1][1])
+        # 1. 提取所有配置標籤
+        for tag in ["RUNNINGCONFIG", "STARTUPCONFIG", "IOS_CONFIG"]:
+            configs = fast_extract_tags(content, tag)
+            for config_body in configs:
+                # 區塊級去重：如果這個配置內容完全看過了，就不重複處理
+                config_hash = hash(config_body)
+                if config_hash in seen_configs: continue
+                seen_configs.add(config_hash)
 
-            if dev_name not in device_data: device_data[dev_name] = []
-            
-            lines = re.findall(r'<LINE>(.*?)</LINE>', block_content, re.DOTALL | re.IGNORECASE)
-            for l in lines:
-                l_clean = clean_xml_tag(l)
-                if l_clean and l_clean != "!":
-                    device_data[dev_name].append(l_clean)
+                # 定位主人
+                body_pos = content.find(config_body)
+                lookback = content[max(0, body_pos-30000) : body_pos]
+                name_match = re.findall(r'<(SYS_NAME|NAME)[^>]*?>(.*?)</\1>', lookback, re.IGNORECASE | re.DOTALL)
+                dev_name = clean_xml_tag(name_match[-1][1]) if name_match else "Unknown"
+                
+                if dev_name not in device_data: device_data[dev_name] = []
+                
+                lines = re.findall(r'<LINE>(.*?)</LINE>', config_body, re.DOTALL | re.IGNORECASE)
+                for l in lines:
+                    l_clean = clean_xml_tag(l)
+                    # 預過濾掉完全沒用的噪音，但保留結構指令
+                    if l_clean and l_clean != "!" and not l_clean.startswith("Building configuration"):
+                        device_data[dev_name].append(l_clean)
 
-        # 策略 2：掃描所有設備標籤下的獨立定址資訊 (針對 PC/Server)
-        print("正在掃描設備靜態定址資訊...")
-        devices = re.finditer(r'<DEVICE.*?>.*?</DEVICE>', content, re.DOTALL | re.IGNORECASE)
-        for dev_match in devices:
-            dev_block = dev_match.group(0)
-            # 取得名稱
+        # 2. 提取 PC/Server 屬性
+        device_blocks = fast_extract_tags(content, "DEVICE")
+        for dev_block in device_blocks:
             n_match = re.search(r'<(SYS_NAME|NAME)[^>]*?>(.*?)</\1>', dev_block, re.IGNORECASE | re.DOTALL)
-            name = clean_xml_tag(n_match.group(2)) if n_match else None
-            if not name: continue
-
+            name = clean_xml_tag(n_match.group(2)) if n_match else "Unknown"
             if name not in device_data: device_data[name] = []
             
-            # 抓取常見定址標籤 (IP, Gateway, IPv6)
-            # 這裡我們用簡單的 findall 抓取所有這類標籤的「內容」
-            addr_tags = ["IP_ADDRESS", "GATEWAY", "SUBNET_MASK", "IPV6_ADDRESS", "IPV6_PORT_GATEWAY", "IPV6_LINK_LOCAL"]
-            for tag in addr_tags:
-                matches = re.findall(f'<{tag}[^>]*?>(.*?)</{tag}>', dev_block, re.IGNORECASE | re.DOTALL)
-                for val in matches:
-                    val_clean = clean_xml_tag(val)
-                    if val_clean and val_clean != "0.0.0.0" and len(val_clean) > 2:
-                        device_data[name].append(f"{tag}: {val_clean}")
+            for tag in ["IP_ADDRESS", "GATEWAY", "IPV6_ADDRESS"]:
+                vals = re.findall(f'<{tag}[^>]*?>(.*?)</{tag}>', dev_block, re.IGNORECASE | re.DOTALL)
+                for v in vals:
+                    v_clean = clean_xml_tag(v)
+                    if v_clean and v_clean != "0.0.0.0" and len(v_clean) > 2:
+                        # 標註這是靜態設定，避免與 CLI 混淆
+                        info = f"[Static] {tag}: {v_clean}"
+                        if info not in device_data[name]:
+                            device_data[name].append(info)
 
-        # C. 彙整數據
+        # C. 數據整合 (移除不合理的「行級去重」，因為 no shutdown 等指令可能會重複出現)
         extracted_blocks = []
         for dev, lines in device_data.items():
             if lines:
-                # 簡單去重
-                unique_lines = []
-                seen = set()
-                for l in lines:
-                    if l not in seen:
-                        unique_lines.append(l)
-                        seen.add(l)
-                extracted_blocks.append(f"### DEVICE: {dev}\n" + "\n".join(unique_lines))
+                extracted_blocks.append(f"### DEVICE: {dev}\n" + "\n".join(lines))
 
         all_cmds_text = "\n\n".join(extracted_blocks)
-        print(f"提取完成，總長度: {len(all_cmds_text)}，設備數: {len(device_data)}")
+        
+        if not all_cmds_text:
+             return {"status": "error", "message": "無法在檔案中定位到任何配置"}
 
-        if len(all_cmds_text) < 50:
-            return {"status": "error", "message": "無法在檔案中定位到任何有效的配置或定址資訊"}
-
-        # D. 提示詞：CCIE 專家級彙整
+        # D. 提示詞恢復：CCIE 專家強度
         prompt = f"""
-        你是一位 Cisco CCIE 專家教官。我提供了從 PKA 中提取的混和定址資訊與 CLI 配置。
+        你是一位 Cisco CCIE 專家，現在正在審核一份 Packet Tracer 實驗的配置數據。
         
         ### 任務：
-        1. 【全向彙整】：請根據 `DEVICE` 標記，將配置整理為 ## [HOSTNAME]。如果是 PC 設備，請特別列出其 IP、Gateway 與 IPv6 位址。
-        2. 【深度核對】：確保 4.1.3.5 等挑戰實驗中的 IPv4/IPv6、子介面、封裝指令 (dot1Q) 與靜態路由完整呈現。
-        3. 【Range 特化】：路由器/交換器的相同連續介面配置，必須合併為 `interface range` 指令。
-        4. 【純淨輸出】：移除所有 '!' 與 version, timestamps 等系統冗餘訊息。
+        1. 【精確整理】：根據 `DEVICE` 標記整理配置，輸出格式為 ## [HOSTNAME]。
+        2. 【完整性守護】：這是一項極其嚴肅的任務。必須確保 4.1.3.5 等實驗中的 IPv4/IPv6、子介面配置、封裝格式 (encapsulation dot1Q) 以及關鍵的路由協議 (OSPF/EIGRP) 完整無缺。**嚴禁漏掉任何一行介面指令。**
+        3. 【PC 定址】：如果數據包含 `[Static]` 開頭的定址資訊，請在該設備標題下優先列出。
+        4. 【Range 合併】：多個相同配置的連續介面，必須合併為 `interface range` 以提升腳本可讀性。
+        5. 【精簡雜訊】：移除所有單獨的 '!'、version 號、timestamps 等不屬於實驗要求的垃圾訊息。
 
         ### 輸出格式：
         - 標題：## [HOSTNAME]
-        - 設備間分隔線：'------'
-        - 僅輸出純淨 CLI 指令或端點定址參數，嚴禁 Markdown 區塊外的文字解釋。
+        - 分隔線：'------'
+        - 僅輸出純淨 CLI 指令，嚴禁在 Markdown 區塊外進行任何文字說明或解釋。
 
         原始數據：
         {all_cmds_text}

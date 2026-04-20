@@ -40,17 +40,19 @@ async def analyze_pka(file: UploadFile = File(...)):
         content = re.sub(r'<PIXMAPBANK>.*?</PIXMAPBANK>', '', content, flags=re.DOTALL)
         content = re.sub(r'<GUI_DATA>.*?</GUI_DATA>', '', content, flags=re.DOTALL)
 
-        # C. 提取 Network 區塊 (忽略大小寫，跨行抓取)
+        # C. 提取 Network 區塊 (修改版：合併所有區塊以防遺漏設備)
         network_blocks = re.findall(r'<NETWORK.*?</NETWORK>', content, re.IGNORECASE | re.DOTALL)
         
         if not network_blocks:
+            # 如果連標籤都找不到，回傳解密內容前 50 字偵錯
             debug_info = content[:50].replace('<', '&lt;')
-            return {"status": "error", "message": f"無法解析 PKA 結構。解密開頭：{debug_info}"}
+            return {"status": "error", "message": f"無法解析 PKA 結構：找不到 NETWORK 標籤。解密開頭：{debug_info}"}
             
-        # 取得最後一個 Network 區塊 (通常是答案區)
-        answer_block = network_blocks[-1]
+        # 關鍵修改：不只取 [-1]，我們取所有區塊並合併 (通常答案分布在最後 1-2 個 NETWORK 區塊)
+        # 合併所有 block，讓 AI 自己去判斷哪些是重複的
+        answer_block = "\n".join(network_blocks) 
         
-        # D. 提取 LINE 指令
+        # D. 提取所有 LINE 指令 (這時會包含 R1, S1 等所有設備)
         raw_lines = re.findall(r'<LINE>(.*?)</LINE>', answer_block, re.IGNORECASE | re.DOTALL)
         clean_cmds = [l.replace('&lt;', '<').replace('&gt;', '>').replace('&amp;', '&') for l in raw_lines]
         all_cmds_text = "\n".join(clean_cmds)
@@ -58,37 +60,41 @@ async def analyze_pka(file: UploadFile = File(...)):
         if not all_cmds_text:
              return {"status": "error", "message": "已定位到 Network 區塊，但內部沒有任何指令標籤"}
 
-        # E. 呼叫 Gemini 整理 (加入設備存活檢查與防截斷指令)
+        # E. 呼叫 Gemini 整理 (加入設備存活檢查與防遺漏指令)
         prompt = f"""
-        你是一位 Cisco 專家。這是一份從 PKA XML 中提取的原始數據流。
-        
-        ### 🚨 重要：強制性完整輸出要求
-        1. 【主機清查】：首先掃描原始數據中出現的所有不同 'hostname'（例如 R1, S1, ISP 等）。
-        2. 【嚴禁截斷】：你必須完整輸出清查到的「每一台」主機配置。禁止因為內容重複或長度原因省略任何一台設備。
-        3. 【重點核對】：特別注意 R1（或路由器）的子介面 (sub-interfaces, 如 G0/1.10)，這些是 Inter-VLAN Routing 的核心答案，絕對不能漏掉。
+        你是一位 Cisco 網路教官。我將提供從 PKA XML 中提取的原始 Running-config。
+        請嚴格執行以下多階段處理邏輯：
 
-        ### 🛠️ 高效合併與過濾規則 (Unit 1-8 標準):
-        - 【Range 合併】：所有配置完全相同的連續介面（如 Access Vlan 10, Port-fast）「必須」合併為 `interface range`。
-        - 【精簡顯示】：
-            - 排除所有 '!'、XML 標籤、標記、以及 version, timestamps 等系統預設指令。
-            - 排除狀態為 shutdown 且「完全沒有」任何 IP、VLAN 或描述設定的介面。
-        - 【功能保留】：保留 enable secret, banner motd, VLAN 命名, encapsulation dot1Q, Static Route, DHCP Pool, VTY SSH。
+        ### 第一階段：設備存活清查 (必做)
+        - 請先掃描原始數據中出現的所有不同 'hostname'。
+        - 你必須意識到：如果忽略了路由器（如 R1）的子介面配置，這份答案就是 0 分。
+        - 強制要求：你必須輸出原始數據中出現過的「每一台」主機配置，嚴禁截斷或省略。
 
-        ### 📋 輸出結構：
+        ### 第二階段：指令壓縮與合併 (Unit 1-8 標準)
+        - 【Range 合併】：所有配置完全相同的連續介面（例如 F0/11-17 全是 Access VLAN 10），必須合併為 `interface range`。
+        - 【精簡噪音】：
+            - 移除所有 '!' 符號與 XML 殘留標籤。
+            - 移除 version, timestamps, ip classless 等系統自動生成的冗餘行。
+            - 排除沒有任何 IP 或 VLAN 配置且處於 shutdown 狀態的介面。
+
+        ### 第三階段：重點功能保留
+        - 保留 enable secret、VLAN 命名、子介面 (sub-interfaces) 封裝指令 (encapsulation dot1Q)、Static Route 與 DHCP 設定。
+
+        ### 輸出格式：
         - 格式：## [HOSTNAME]
-        - 設備間分隔線：'------'
-        - 僅輸出 CLI 指令，嚴禁任何解釋或 Markdown 語法外的文字。
+        - 分隔線：'------'
+        - 僅輸出純淨的 CLI 指令，嚴禁任何 Markdown 區塊外的文字解釋。
 
         原始數據：
         {all_cmds_text}
         """
 
-        # 這裡的 generation_config 是防止截斷的關鍵
+        # 增加 max_output_tokens 以確保空間，temperature 設為 0 以保持穩定
         response = model.generate_content(
             prompt,
             generation_config={
                 "max_output_tokens": 4096,
-                "temperature": 0, # 設為 0 以獲得最穩定、最不懶惰的結果
+                "temperature": 0,
                 "top_p": 1
             }
         )

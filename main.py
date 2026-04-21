@@ -1,5 +1,6 @@
 import os
 import re
+import xml.etree.ElementTree as ET
 from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -43,6 +44,19 @@ def broad_dehydrate(content):
         
     return content
 
+def format_assess_tree(node, depth=0):
+    """
+    將繁雜的 XML 給分樹轉化為清晰俐落的 YAML 式層級清單
+    讓前端 Lite AI 模型能夠精確對應設備與指令，而不發生錯頻或漏看。
+    """
+    s = ""
+    for child in node:
+        if child.tag == 'TEXT' and child.text:
+            s += '  ' * depth + '- ' + child.text + '\n'
+        else:
+            s += format_assess_tree(child, depth + 1)
+    return s
+
 @app.post("/upload")
 async def analyze_pka(file: UploadFile = File(...)):
     try:
@@ -51,14 +65,19 @@ async def analyze_pka(file: UploadFile = File(...)):
         raw_xml_data = decrypt_pkt(pka_bytes)
         content = raw_xml_data.decode('utf-8', errors='ignore')
 
-        # 1. 提取黃金標準答案 (ASSESS_TREE) 並進行「終極濃縮」
+        # 1. 提取黃金標準答案 (ASSESS_TREE) 並進行「結構化扁平」
         assess_match = re.search(r'<ASSESS_TREE[^>]*?>(.*?)</ASSESS_TREE>', content, re.DOTALL | re.IGNORECASE)
         assess_data = ""
         if assess_match:
-            tree_content = assess_match.group(1)
-            # 只抽出 TEXT 元素，捨棄肥大的結構層級，讓 Lite 模型不會眼花漏看重點
-            text_tags = re.findall(r'<TEXT>.*?</TEXT>', tree_content, re.IGNORECASE)
-            assess_data = "\n".join(text_tags)
+            tree_raw = '<ROOT>' + assess_match.group(1) + '</ROOT>'
+            try:
+                root = ET.fromstring(tree_raw)
+                assess_data = format_assess_tree(root)
+            except Exception as e:
+                print(f"ASSESS_TREE XML 解析失敗: {e}")
+                # 退回舊版正則提取
+                text_tags = re.findall(r'<TEXT>(.*?)</TEXT>', assess_match.group(1), re.IGNORECASE)
+                assess_data = "\n".join(["- " + t for t in text_tags])
 
         # 2. 提取網路現狀並脫水：NETWORK
         clean_xml = broad_dehydrate(content)
@@ -71,17 +90,18 @@ async def analyze_pka(file: UploadFile = File(...)):
         # 3. 組合「雙軌上下文」
         context_data = ""
         if assess_data:
-            context_data += f"--- [ASSESSMENT SCORE KEY (濃縮版滿分解答)] ---\n{assess_data}\n\n"
-        context_data += f"--- [CURRENT NETWORK CONFIGURATION (設備現有屬性)] ---\n{network_data}"
+            context_data += f"--- [ASSESSMENT SCORE KEY (結構化滿分解答卷)] ---\n{assess_data}\n\n"
+        context_data += f"--- [CURRENT NETWORK CONFIGURATION (設備現狀)] ---\n{network_data}"
 
-        # 4. Lite 模型防呆專用 Prompt 
+        # 4. Lite 最終防雷專用 Prompt
         prompt = f"""
-        你是一位 Cisco 網路配置專家，受命根據 Packet Tracer 的「滿分解答作弊紙 (ASSESSMENT SCORE KEY)」來生成完美的 CLI 腳本。
+        你是一位 Cisco 網路配置專家，受命根據 Packet Tracer 的「滿分解答作弊紙 (ASSESSMENT SCORE KEY)」來生成最完美的 CLI 腳本。
         
-        ### 🎯 最高行動準則 (ASSESSMENT 絕對主導)：
-        1. 【照抄得滿分】：`[ASSESSMENT SCORE KEY]` 裡列出了得分重點考驗項目。例如你看到裡面寫了 `<TEXT>VLAN 100</TEXT>` 和 `<TEXT>Name: Native</TEXT>`，這代表在該設備下，這就是標準答案！**你必須 100% 把作弊紙上紀錄的所有 VLAN 都生成出來，一個都不准漏掉！絕對不可以因為數量多就擅自省略！**
-        2. 【過濾非考點】：`[CURRENT NETWORK CONFIGURATION]` 裡會有一大堆垃圾預設值 (例如 `spanning-tree mode pvst`, `duplex auto`, `speed auto` 等)。**請記住一條鐵則：如果 `[ASSESSMENT SCORE KEY]` 裡面根本沒有提到這些指令，請直接把它們當作空氣，絕對不要寫進腳本中！**
-        3. 【屬性合成為 CLI】：如果答案樹裡要求設定某個特定 IP，請再去 `NETWORK` 裡的 `<SUBNET>` 屬性合成為標準 `ip address` 指令。
+        ### 🎯 最高行動準則 (對帳單絕對主導)：
+        1. 【照抄得滿分】：請仔細看 `[ASSESSMENT SCORE KEY]`，現在它已被整理成附帶縮排的層級結構。例如 `S1` 底下如果有 5 個 `VLAN`，你就**必須在 S1 身上宣告整整 5 個 VLAN，一個都不准漏掉！絕對不可以因為數量多就擅自省略！**
+        2. 【全設備巡查】：請確保你為 `[ASSESSMENT SCORE KEY]` 裡面出現的**每一台設備 (如 S1, S2, S3 或 R1, R2, R3)** 都生成了對應的配置腳本。絕不能只寫第一台就停下來！
+        3. 【過濾非考點】：如果 `[CURRENT NETWORK CONFIGURATION]` 裡有一些原本設備自動生成的指令 (如 `spanning-tree mode pvst`, `duplex auto` 等)，但 `[ASSESSMENT SCORE KEY]` 裡根本沒有考它，**請直接把它們當作空氣，絕對不要寫出來！**
+        4. 【屬性合成為 CLI】：如果答案樹裡要求設定某個特定 IP，請回去看 `[CURRENT NETWORK CONFIGURATION]` 的 `<SUBNET>` 來拼湊出完整的 `ip address` 指令。
 
         ### 📖 核心指令排版參考 (僅用於決定輸出 CLI 語法)：
         1. 管理與安全：hostname, enable secret, service password-encryption, ip domain-name, crypto key, username secret, line vty, login local, logging synchronous, exec-timeout。
@@ -90,12 +110,11 @@ async def analyze_pka(file: UploadFile = File(...)):
         4. 進階服務：ip dhcp pool, default-router, dns-server, ip helper-address。
 
         ### 🚨 格式嚴格規範 (死指令)：
-        1. 【禁止殘留】：嚴禁在輸出中保留任何 `< >` 標籤。
+        1. 【禁止殘留】：嚴禁在輸出中保留任何 `< >` 標籤或 YAML 的 `-` 符號。你只能輸出純 Cisco 設備命令。
         2. 【模式退出】：寫完任何子模式 (如 `interface`, `router`, `vlan` 等) 後，能在行尾**加上一單行 `exit` 指令**。
         3. 【全域排版優先】：`hostname` 這種全域指令排在最前面，不要夾在介面下。
-        4. 【Range 合併】：多個需要相同設定的埠口 (有出現在 ASSESSMENT 中)，盡量合併為 `interface range` 指令。
-        5. 【無噪音輸出】：移除所有 '!' 符號。每個設備使用 ## [HOSTNAME] 作為標題。
-        6. 【純淨腳本】：僅輸出 CLI 指令，嚴禁解釋文字。
+        4. 【Range 合併】：多個需要相同設定的埠口 (有出現在 ASSESSMENT 中)，能合併則合併為 `interface range` 指令。
+        5. 【設備分隔】：每個設備使用 ## [HOSTNAME] 作為標題，設備間以 '------' 分隔。
 
         數據流：
         {context_data}

@@ -9,7 +9,6 @@ from Decipher.pt_crypto import decrypt_pkt
 # 1. 初始化
 app = FastAPI()
 
-# 強制開啟 CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], 
@@ -17,12 +16,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 從環境變數讀取 API KEY
 API_KEY = os.environ.get("GEMINI_API_KEY")
 if API_KEY:
     genai.configure(api_key=API_KEY)
 
-model = genai.GenerativeModel('gemini-3.1-flash-lite-preview')
+# 由於 context 可能非常長，建議使用 gemini-1.5-flash 或 gemini-2.0-flash 來獲得更好的遵循度與長文本能力
+model = genai.GenerativeModel('gemini-1.5-flash')
 
 @app.get("/")
 async def read_index():
@@ -33,10 +32,6 @@ async def ping():
     return {"status": "alive"}
 
 def broad_dehydrate(content):
-    """
-    極致脫水：移除全域 XML 中體積最大的二進位/圖形區塊。
-    保留所有剩餘的文字結構與屬性。
-    """
     heavy_tags = ['PIXMAPBANK', 'GUI_DATA', 'SESSION_DATA', 'IMAGE', 'PIXMAP', 'VISUAL_DATA']
     for tag in heavy_tags:
         pattern = re.compile(f'<{tag}[^>]*?>.*?</{tag}>', re.DOTALL | re.IGNORECASE)
@@ -57,41 +52,49 @@ async def analyze_pka(file: UploadFile = File(...)):
         raw_xml_data = decrypt_pkt(pka_bytes)
         content = raw_xml_data.decode('utf-8', errors='ignore')
 
-        # A. 全域極致脫水
+        # 1. 提取黃金標準答案：ASSESS_TREE
+        assess_match = re.search(r'<ASSESS_TREE[^>]*?>(.*?)</ASSESS_TREE>', content, re.DOTALL | re.IGNORECASE)
+        assess_data = assess_match.group(1).strip() if assess_match else ""
+
+        # 2. 提取網路現狀並脫水：NETWORK
         clean_xml = broad_dehydrate(content)
-        
         network_match = re.search(r'<NETWORK[^>]*?>(.*?)</NETWORK>', clean_xml, re.DOTALL | re.IGNORECASE)
-        context_data = network_match.group(1) if network_match else clean_xml
+        network_data = network_match.group(1).strip() if network_match else clean_xml
         
-        if not context_data.strip():
+        if not network_data:
              return {"status": "error", "message": "檔案脫水後為空，無法定位網路配置數據。"}
 
-        # B. 新世代語義合成 Prompt (加入自動 Exit 與全域置頂邏輯)
-        prompt = f"""
-        你是一位 Cisco 網路配置專家。我提供了一份 Packet Tracer PKA 檔案的「脫水全量 XML」內容。
-        你的任務是通盤解析這份 XML，將所有設定還原為乾淨、可以直接「一次性全選貼上」到設備终端的 CLI 配置腳本。
-        
-        ### 📖 核心指令指南 (必須核對並準確還原)：
-        1. 【管理與安全】：hostname, enable secret, service password-encryption, ip domain-name, crypto key, username secret, line vty, login local, logging synchronous, exec-timeout。
-        2. 【VLAN 與交換】：vlan (ID/Name), switchport mode, switchport access vlan, native vlan, nonegotiate, spanning-tree (portfast/bpduguard), port-security。
-        3. 【路由與定址】：interface, encapsulation dot1q, ip address, ipv6 address, ipv6 unicast-routing, ip route, router ospf, network。
-        4. 【進階服務】：ip dhcp pool, network, default-router, dns-server, ip helper-address, ipv6 nd。
+        # 3. 組合「雙軌上下文」
+        context_data = ""
+        if assess_data:
+            context_data += f"--- [ASSESSMENT / ANSWER KEY TREE (滿分標準答案對照表)] ---\n{assess_data}\n\n"
+        context_data += f"--- [CURRENT NETWORK CONFIGURATION (設備現有屬性)] ---\n{network_data}"
 
-        ### 🔍 深度解析策略 (重要)：
-        1. 【尋寶模式】：Packet Tracer 不一定把配置寫在 `<LINE>` 裡。你必須檢查 XML 裡的屬性標籤 (例如 `<IP>`, `<SUBNET>`, `<IP_DHCP_POOL_LIST>`, `<VLAN_LIST>`)。
-        2. 【屬性合成 CLI】：如果你在屬性中看到了如 `<IP>10.1.1.2</IP>` 與 `<SUBNET>255.255.255.252</SUBNET>`，你必須人工將其轉換為 `ip address 10.1.1.2 255.255.255.252` 並放入對應的 interface 下。
-        3. 【DHCP 重建】：搜索全域的 `<IP_DHCP_POOL_LIST>`。將其中的 `NETWORK_ADDRESS`, `SUBNET_MASK`, `DEFAULT_GATEWAY` 等屬性還原成完整的 `ip dhcp pool` 腳本結構，並放置在正確的設備標籤下。
+        # 4. 新世代 Prompt (答案樹絕對主導模式)
+        prompt = f"""
+        你是一位 Cisco 網路配置專家，受命根據 Packet Tracer 的「滿分解答樹 (ASSESSMENT)」來生成最完美的 CLI 腳本。
+        
+        ### 🎯 最高行動準則 (ASSESSMENT 絕對主導)：
+        1. 【照抄得滿分】：`[ASSESSMENT / ANSWER KEY TREE]` 是唯一的真實標準。所有出現在這棵樹裡的配置需求 (如所有的 VLAN ID 與名稱、要求設定的 port access/trunk、所有的 interface IP 等) **必須 100% 寫入腳本中，絕對不能遺漏任何一個！(例如看到 5 個 VLAN 就必須在 switch 上生成 5 個 VLAN 的全域宣告)**
+        2. 【過濾非考點】：如果 `[CURRENT NETWORK CONFIGURATION]` 裡有一些設備預設產生的指令 (例如 `spanning-tree mode pvst` 或 `duplex auto` 或 `speed auto`)，只要 `[ASSESSMENT]` 裡根本沒有考核這些東西，請**直接忽略它們，絕對不要寫出！** (除非答案表裡有明確要求設定 spanning-tree)。
+        3. 【屬性合成為 CLI】：如果答案樹裡要求了某個 IP，請參考 `NETWORK` 裡的 `<SUBNET>` 等屬性將其合成為標準指令 (如 `ip address ...`)。
+
+        ### 📖 核心指令排版參考 (僅用於決定輸出 CLI 語法)：
+        1. 管理與安全：hostname, enable secret, service password-encryption, ip domain-name, crypto key, username secret, line vty, login local, logging synchronous, exec-timeout。
+        2. VLAN 與交換：vlan (ID/Name), switchport mode, switchport access vlan, switchport trunk native vlan, nonegotiate, port-security。
+        3. 路由與定址：interface, encapsulation dot1q, ip address, ipv6 address, ipv6 unicast-routing, ip route, router ospf, network。
+        4. 進階服務：ip dhcp pool, default-router, dns-server, ip helper-address。
 
         ### 🚨 格式嚴格規範 (死指令)：
-        1. 【禁止 XML 殘留】：嚴禁在輸出中保留任何 `<`、`>` 或是 XML 標籤外殼。
+        1. 【禁止 XML 殘留】：嚴禁在輸出中保留任何 XML 標籤外殼 `< >`。你只能輸出純命令。
         2. 【模式退出 (EXIT)】：為了讓腳本可以直接一次貼上執行，在完成任何子模式 (如 `interface`, `router`, `line`, `ip dhcp pool`, `vlan`) 的配置後，**必須加上一行 `exit` 指令**，確保回到全域模式。
-        3. 【全域排版優先】：像 `hostname`, `enable secret`, `spanning-tree` 這種全域指令，必須排在腳本的最開頭位置，絕不能放在 `interface` 等子模式裡面。
-        4. 【Range 合併】：凡是「配置完全相同」的連續埠口，必須合併為 `interface range` 指令。
+        3. 【全域排版優先】：像 `hostname` 這種全域指令，必須排在某台設備腳本的最開頭位置，絕不能夾雜在 `interface` 或 `vlan` 子模式裡面。
+        4. 【Range 合併】：凡是「被 ASSESSMENT 考核且配置完全相同」的連續埠口，必須盡可能合併為 `interface range` 指令。
         5. 【無噪音輸出】：移除所有 '!' 符號、`Building configuration` 等報文。
         6. 【設備分隔】：每個設備使用 ## [HOSTNAME] 作為標題，設備間以 '------' 分隔。
         7. 【純淨腳本】：僅輸出 CLI 指令，嚴禁解釋文字。
 
-        原始全量脫水數據：
+        雙軌數據流 (滿分解答卷 + 現有屬性)：
         {context_data}
         """
 

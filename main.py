@@ -45,10 +45,6 @@ def broad_dehydrate(content):
     return content
 
 def format_assess_tree(node, depth=0):
-    """
-    將繁雜的 XML 給分樹轉化為清晰俐落的 YAML 式層級清單
-    讓前端 Lite AI 模型能夠精確對應設備與指令，而不發生錯頻或漏看。
-    """
     s = ""
     for child in node:
         if child.tag == 'TEXT' and child.text:
@@ -65,7 +61,7 @@ async def analyze_pka(file: UploadFile = File(...)):
         raw_xml_data = decrypt_pkt(pka_bytes)
         content = raw_xml_data.decode('utf-8', errors='ignore')
 
-        # 1. 提取黃金標準答案 (ASSESS_TREE) 並進行「結構化扁平」
+        # 1. 提取黃金標準答案 (ASSESS_TREE)
         assess_match = re.search(r'<ASSESS_TREE[^>]*?>(.*?)</ASSESS_TREE>', content, re.DOTALL | re.IGNORECASE)
         assess_data = ""
         if assess_match:
@@ -74,8 +70,6 @@ async def analyze_pka(file: UploadFile = File(...)):
                 root = ET.fromstring(tree_raw)
                 assess_data = format_assess_tree(root)
             except Exception as e:
-                print(f"ASSESS_TREE XML 解析失敗: {e}")
-                # 退回舊版正則提取
                 text_tags = re.findall(r'<TEXT>(.*?)</TEXT>', assess_match.group(1), re.IGNORECASE)
                 assess_data = "\n".join(["- " + t for t in text_tags])
 
@@ -87,36 +81,36 @@ async def analyze_pka(file: UploadFile = File(...)):
         if not network_data:
              return {"status": "error", "message": "檔案脫水後為空，無法定位網路配置數據。"}
 
-        # 3. 組合「雙軌上下文」
-        context_data = ""
+        # 3. 組合「雙軌上下文」：網路現狀必須完整保留，答案樹作為「防漏網」加置於末尾
+        context_data = f"--- [CURRENT NETWORK CONFIGURATION] ---\n{network_data}\n\n"
         if assess_data:
-            context_data += f"--- [ASSESSMENT SCORE KEY (結構化滿分解答卷)] ---\n{assess_data}\n\n"
-        context_data += f"--- [CURRENT NETWORK CONFIGURATION (設備現狀)] ---\n{network_data}"
+            context_data += f"--- [ASSESSMENT SCORE KEY] ---\n{assess_data}"
 
-        # 4. Lite 最終防雷專用 Prompt
+        # 4. 回退為通用的穩定版本 Prompt，不再一味強制抹除設備本身特有的設定。融合「現狀」與「考試要求」的互補特性。
         prompt = f"""
-        你是一位 Cisco 網路配置專家，受命根據 Packet Tracer 的「滿分解答作弊紙 (ASSESSMENT SCORE KEY)」來生成最完美的 CLI 腳本。
+        你是一位 Cisco 網路配置專家。我提供了一份 Packet Tracer PKA 檔案的脫水全量 XML（包含 `CURRENT NETWORK CONFIGURATION` 與 `ASSESSMENT SCORE KEY`）。
+        你的任務是通盤解析這兩份數據，將所有網路設定還原為乾淨、可以直接「一次性全選貼上」到設備终端的 CLI 配置腳本。
         
-        ### 🎯 最高行動準則 (對帳單絕對主導)：
-        1. 【照抄得滿分】：請仔細看 `[ASSESSMENT SCORE KEY]`，現在它已被整理成附帶縮排的層級結構。例如 `S1` 底下如果有 5 個 `VLAN`，你就**必須在 S1 身上宣告整整 5 個 VLAN，一個都不准漏掉！絕對不可以因為數量多就擅自省略！**
-        2. 【全設備巡查】：請確保你為 `[ASSESSMENT SCORE KEY]` 裡面出現的**每一台設備 (如 S1, S2, S3 或 R1, R2, R3)** 都生成了對應的配置腳本。絕不能只寫第一台就停下來！
-        3. 【過濾非考點】：如果 `[CURRENT NETWORK CONFIGURATION]` 裡有一些原本設備自動生成的指令 (如 `spanning-tree mode pvst`, `duplex auto` 等)，但 `[ASSESSMENT SCORE KEY]` 裡根本沒有考它，**請直接把它們當作空氣，絕對不要寫出來！**
-        4. 【屬性合成為 CLI】：如果答案樹裡要求設定某個特定 IP，請回去看 `[CURRENT NETWORK CONFIGURATION]` 的 `<SUBNET>` 來拼湊出完整的 `ip address` 指令。
+        ### 📖 核心指令指南 (必須核對並準確還原)：
+        1. 【管理與安全】：hostname, enable secret, service password-encryption, ip domain-name, crypto key, username secret, line vty, login local, logging synchronous, exec-timeout。
+        2. 【VLAN 與交換】：vlan, switchport mode, switchport access vlan, switchport trunk native vlan, nonegotiate, spanning-tree (portfast/bpduguard), port-security。
+        3. 【路由與定址】：interface, encapsulation dot1q, ip address, ipv6 address, ipv6 unicast-routing, ip route, router ospf, network。
+        4. 【進階服務】：ip dhcp pool, network, default-router, dns-server, ip helper-address, ipv6 nd。
 
-        ### 📖 核心指令排版參考 (僅用於決定輸出 CLI 語法)：
-        1. 管理與安全：hostname, enable secret, service password-encryption, ip domain-name, crypto key, username secret, line vty, login local, logging synchronous, exec-timeout。
-        2. VLAN 與交換：vlan (ID/Name), switchport mode, switchport access vlan, switchport trunk native vlan, nonegotiate, port-security。
-        3. 路由與定址：interface, encapsulation dot1q, ip address, ipv6 address, ipv6 unicast-routing, ip route, router ospf, network。
-        4. 進階服務：ip dhcp pool, default-router, dns-server, ip helper-address。
+        ### 🔍 深度解析策略 (綜合互補原則)：
+        1. `[CURRENT NETWORK CONFIGURATION]` 包含了許多設備深層設定（如 XML 標籤 `<IP>`, `<SUBNET>`, `<IP_DHCP_POOL_LIST>`, 以及既有的 VLAN Name）。如果這些標籤存在，你必須人工將其轉換為正確的 `ip address` 或 `vlan name`。
+        2. `[ASSESSMENT SCORE KEY]` (如果有的話) 是考試的必做清單。**這兩邊的資料是互補的**：如果考卷上寫了你要建 `VLAN 100 Native` 和 `VLAN 999 Blackhole`，即使這兩個 VLAN 沒被綁定在任何 Port 上，你也**必須**乖乖為該交換機建立這兩個 VLAN。只要是出現在這兩邊其中一邊的要求，你都得輸出！
 
         ### 🚨 格式嚴格規範 (死指令)：
-        1. 【禁止殘留】：嚴禁在輸出中保留任何 `< >` 標籤或 YAML 的 `-` 符號。你只能輸出純 Cisco 設備命令。
-        2. 【模式退出】：寫完任何子模式 (如 `interface`, `router`, `vlan` 等) 後，能在行尾**加上一單行 `exit` 指令**。
-        3. 【全域排版優先】：`hostname` 這種全域指令排在最前面，不要夾在介面下。
-        4. 【Range 合併】：多個需要相同設定的埠口 (有出現在 ASSESSMENT 中)，能合併則合併為 `interface range` 指令。
-        5. 【設備分隔】：每個設備使用 ## [HOSTNAME] 作為標題，設備間以 '------' 分隔。
+        1. 【禁止 XML 殘留】：嚴禁在輸出中保留任何 `<`、`>` 或 YAML 符號。你只能輸出純命令。
+        2. 【模式退出 (EXIT)】：為了讓腳本可以直接一次貼上執行，在完成任何子模式 (如 `interface`, `router`, `line`, `ip dhcp pool`, `vlan`) 的配置後，**必須加上一行 `exit` 指令**，確保回到全域模式。
+        3. 【全域排版優先】：像 `hostname`, `enable secret`, `spanning-tree` 這種全域指令，必須排在整個設備腳本的最開頭位置，絕不能夾雜在介面底下。
+        4. 【Range 合併】：凡是「配置完全相同」的連續埠口，請必須合併為 `interface range` 指令，例如 `interface range f0/10-20` 或是 `interface range g1/0/1-2`，這對提升貼上效率非常重要。
+        5. 【無噪音輸出】：移除所有 '!' 符號、`Building configuration` 等報文。
+        6. 【設備分隔】：每個設備使用 ## [HOSTNAME] 作為標題，設備間以 '------' 分隔。不准遺漏任何一台設備！
+        7. 【純淨腳本】：僅輸出 CLI 指令，嚴禁解釋文字。
 
-        數據流：
+        全量網路屬性與配置數據：
         {context_data}
         """
 

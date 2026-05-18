@@ -1,129 +1,168 @@
 import os
 import re
 import xml.etree.ElementTree as ET
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 import google.generativeai as genai
+from google.generativeai.types import HarmCategory, HarmBlockThreshold
 from Decipher.pt_crypto import decrypt_pkt
 
-# 1. 初始化
 app = FastAPI()
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"], 
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 API_KEY = os.environ.get("GEMINI_API_KEY")
 if API_KEY:
     genai.configure(api_key=API_KEY)
 
-model = genai.GenerativeModel('gemini-3.1-flash-lite-preview')
+model = genai.GenerativeModel('gemini-3.1-pro-preview')
+
+safety_settings = {
+    HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+    HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+    HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+    HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+}
+
+PHYSICAL_ONLY_BLACKLIST = {
+    "Device Model", "Device Type", "Custom Device Model", "BIA", "MAC Address", 
+    "Port Type", "In Physical Shape", "In Logical Shape", "Power", 
+    "Physical Location", "wattage", "cost", "Tx Ring Limit"
+}
 
 @app.get("/")
 async def read_index():
     return FileResponse('index.html')
 
-@app.get("/ping")
-async def ping():
-    return {"status": "alive"}
+def clean_xml_string(xml_str):
+    xml_str = re.sub(r'[^\x09\x0A\x0D\x20-\uD7FF\xE000-\uFFFD\U00010000-\U0010FFFF]', '', xml_str)
+    xml_str = re.sub(r'&(?!(amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);)', '&amp;', xml_str)
+    return xml_str
 
-def broad_dehydrate(content):
-    heavy_tags = ['PIXMAPBANK', 'GUI_DATA', 'SESSION_DATA', 'IMAGE', 'PIXMAP', 'VISUAL_DATA']
-    for tag in heavy_tags:
-        pattern = re.compile(f'<{tag}[^>]*?>.*?</{tag}>', re.DOTALL | re.IGNORECASE)
-        content = pattern.sub('', content)
-    
-    useless_tags = ['COMMAND_HISTORY', 'SNMP_DATA', 'USER_DATA']
-    for tag in useless_tags:
-        pattern = re.compile(f'<{tag}[^>]*?>.*?</{tag}>', re.DOTALL | re.IGNORECASE)
-        content = pattern.sub('', content)
-        
-    return content
+def extract_pka_data(xml_content):
+    try:
+        xml_content = clean_xml_string(xml_content)
+        root = ET.fromstring(xml_content)
+        device_configs = {}
+        for device in root.findall(".//NETWORK/DEVICE"):
+            name = device.find("NAME").text
+            config = device.find("STARTUPCONFIG").text or ""
+            device_configs[name] = config
 
-def format_assess_tree(node, depth=0):
-    s = ""
-    for child in node:
-        if child.tag == 'TEXT' and child.text:
-            s += '  ' * depth + '- ' + child.text + '\n'
-        else:
-            s += format_assess_tree(child, depth + 1)
-    return s
+        assessment_tree = {}
+        comparisons = root.find(".//COMPARISONS")
+        if comparisons is not None:
+            for dev_node in comparisons.find("NODE").findall("NODE"):
+                dev_name = dev_node.find("ID").text
+                items = []
+                dev_model = "Unknown"
+                def traverse(node, path=[]):
+                    nonlocal dev_model
+                    name_tag = node.find("NAME")
+                    if name_tag is not None:
+                        label = name_tag.text
+                        if label == "Device Model": dev_model = name_tag.get("nodeValue")
+                        if name_tag.get("variableEnabled") == "true" and label not in PHYSICAL_ONLY_BLACKLIST:
+                            val = name_tag.get("nodeValue")
+                            pts = node.find("POINTS").text
+                            if pts != "0":
+                                items.append({"path": "->".join(path+[label]), "target": val, "points": pts})
+                        for child in node.findall("NODE"): traverse(child, path+[label])
+                traverse(dev_node)
+                if items: assessment_tree[dev_name] = {"model": dev_model, "initial_config": device_configs.get(dev_name, ""), "items": items}
+        return assessment_tree
+    except: return None
 
 @app.post("/upload")
-async def analyze_pka(file: UploadFile = File(...)):
+async def analyze_pka(file: UploadFile = File(...), model_choice: str = Form("auto")):
     try:
-        print(f"收到檔案: {file.filename}")
         pka_bytes = await file.read()
-        raw_xml_data = decrypt_pkt(pka_bytes)
-        content = raw_xml_data.decode('utf-8', errors='ignore')
-
-        # 1. 提取黃金標準答案 (ASSESS_TREE)
-        assess_match = re.search(r'<ASSESS_TREE[^>]*?>(.*?)</ASSESS_TREE>', content, re.DOTALL | re.IGNORECASE)
-        assess_data = ""
-        if assess_match:
-            tree_raw = '<ROOT>' + assess_match.group(1) + '</ROOT>'
-            try:
-                root = ET.fromstring(tree_raw)
-                assess_data = format_assess_tree(root)
-            except Exception as e:
-                text_tags = re.findall(r'<TEXT>(.*?)</TEXT>', assess_match.group(1), re.IGNORECASE)
-                assess_data = "\n".join(["- " + t for t in text_tags])
-
-        # 2. 提取網路現狀並脫水：NETWORK
-        clean_xml = broad_dehydrate(content)
-        network_match = re.search(r'<NETWORK[^>]*?>(.*?)</NETWORK>', clean_xml, re.DOTALL | re.IGNORECASE)
-        network_data = network_match.group(1).strip() if network_match else clean_xml
+        content = decrypt_pkt(pka_bytes).decode('utf-8', errors='ignore')
+        structured_data = extract_pka_data(content)
+        if not structured_data: return {"status": "error", "message": "fail"}
         
-        if not network_data:
-             return {"status": "error", "message": "檔案脫水後為空，無法定位網路配置數據。"}
+        context_str = ""
+        for name, data in structured_data.items():
+            context_str += f"DEVICE: {name} ({data['model']})\nINIT:\n{data['initial_config']}\nGOALS:\n"
+            for it in data['items']: context_str += f"- {it['path']} -> {it['target']}\n"
+            context_str += "\n"
 
-        # 3. 組合「雙軌上下文」：網路現狀必須完整保留，答案樹作為「防漏網」加置於末尾
-        context_data = f"--- [CURRENT NETWORK CONFIGURATION] ---\n{network_data}\n\n"
-        if assess_data:
-            context_data += f"--- [ASSESSMENT SCORE KEY] ---\n{assess_data}"
-
-        # 4. 回退為通用的穩定版本 Prompt，不再一味強制抹除設備本身特有的設定。融合「現狀」與「考試要求」的互補特性。
         prompt = f"""
-        你是一位 Cisco 網路配置專家。我提供了一份 Packet Tracer PKA 檔案的脫水全量 XML（包含 `CURRENT NETWORK CONFIGURATION` 與 `ASSESSMENT SCORE KEY`）。
-        你的任務是通盤解析這兩份數據，將所有網路設定還原為乾淨、可以直接「一次性全選貼上」到設備终端的 CLI 配置腳本。
+        你是一位 Cisco 權威專家。請生成配置腳本。
         
-        ### 📖 核心指令指南 (必須核對並準確還原)：
-        1. 【管理與安全】：hostname, enable secret, service password-encryption, ip domain-name, crypto key, username secret, line vty, login local, logging synchronous, exec-timeout。
-        2. 【VLAN 與交換】：vlan, switchport mode, switchport access vlan, switchport trunk native vlan, nonegotiate, spanning-tree (portfast/bpduguard), port-security。
-        3. 【路由與定址】：interface, encapsulation dot1q, ip address, ipv6 address, ipv6 unicast-routing, ip route, router ospf, network。
-        4. 【進階服務】：ip dhcp pool, network, default-router, dns-server, ip helper-address, ipv6 nd。
+        ### 🚨 規則：
+        1. 每個設備必須以 enable, configure terminal 開始。
+        2. 每配置完一個介面必須加 exit。
+        3. 進入下一個介面或輸入全域指令前必須先 exit。
+        4. 禁止 Markdown ```。
+        
+        ### ✅ 正確範例：
+        == R1 ==
+        enable
+        configure terminal
+        interface G0/0
+         ip address 10.1.1.1 255.255.255.0
+         no shutdown
+         exit
+        interface G0/1
+         ip address 10.1.2.1 255.255.255.0
+         no shutdown
+         exit
+        ip route 0.0.0.0 0.0.0.0 G0/0
+        exit
 
-        ### 🔍 深度解析策略 (綜合互補原則)：
-        1. `[CURRENT NETWORK CONFIGURATION]` 包含了許多設備深層設定（如 XML 標籤 `<IP>`, `<SUBNET>`, `<IP_DHCP_POOL_LIST>`, 以及既有的 VLAN Name）。如果這些標籤存在，你必須人工將其轉換為正確的 `ip address` 或 `vlan name`。
-        2. `[ASSESSMENT SCORE KEY]` (如果有的話) 是考試的必做清單。**這兩邊的資料是互補的**：如果考卷上寫了你要建 `VLAN 100 Native` 和 `VLAN 999 Blackhole`，即使這兩個 VLAN 沒被綁定在任何 Port 上，你也**必須**乖乖為該交換機建立這兩個 VLAN。只要是出現在這兩邊其中一邊的要求，你都得輸出！
-
-        ### 🚨 格式嚴格規範 (死指令)：
-        1. 【禁止 XML 殘留】：嚴禁在輸出中保留任何 `<`、`>` 或 YAML 符號。你只能輸出純命令。
-        2. 【模式退出 (EXIT)】：為了讓腳本可以直接一次貼上執行，在完成任何子模式 (如 `interface`, `router`, `line`, `ip dhcp pool`, `vlan`) 的配置後，**必須加上一行 `exit` 指令**，確保回到全域模式。
-        3. 【全域排版優先】：像 `hostname`, `enable secret`, `spanning-tree` 這種全域指令，必須排在整個設備腳本的最開頭位置，絕不能夾雜在介面底下。
-        4. 【Range 合併】：凡是「配置完全相同」的連續埠口，請必須合併為 `interface range` 指令，例如 `interface range f0/10-20` 或是 `interface range g1/0/1-2`，這對提升貼上效率非常重要。
-        5. 【無噪音輸出】：移除所有 '!' 符號、`Building configuration` 等報文。
-        6. 【設備分隔】：每個設備使用 ## [HOSTNAME] 作為標題，設備間以 '------' 分隔。不准遺漏任何一台設備！
-        7. 【純淨腳本】：僅輸出 CLI 指令，嚴禁解釋文字。
-
-        全量網路屬性與配置數據：
-        {context_data}
+        數據內容：
+        {context_str}
         """
-
-        response = model.generate_content(
-            prompt,
-            generation_config={"max_output_tokens": 8192, "temperature": 0}
-        )
         
-        return {"status": "success", "data": response.text}
+        # 根據前端選擇或預設值決定執行模式
+        if model_choice == "pro":
+            target_model = "gemini-3.1-pro-preview"
+            use_fallback = False
+        elif model_choice == "flash":
+            target_model = "gemini-3.1-flash-lite-preview"
+            use_fallback = False
+        else: # "auto" 智能雙階段
+            target_model = "gemini-3.1-pro-preview"
+            use_fallback = True
 
-    except Exception as e:
-        print(f"發生系統錯誤: {str(e)}")
-        return {"status": "error", "message": f"系統錯誤: {str(e)}"}
+        if not use_fallback:
+            # 直接呼叫指定的模型
+            m = genai.GenerativeModel(target_model)
+            res = m.generate_content(
+                prompt,
+                generation_config={"temperature": 0},
+                safety_settings=safety_settings,
+                request_options={"timeout": 300}
+            )
+            return {"status": "success", "data": res.text}
+        else:
+            # 智能雙階段：先試 Pro，逾時或失敗則自動啟用 Flash
+            try:
+                # Pro 模型設定 150 秒超時，避免等待過久
+                m_pro = genai.GenerativeModel("gemini-3.1-pro-preview")
+                res = m_pro.generate_content(
+                    prompt,
+                    generation_config={"temperature": 0},
+                    safety_settings=safety_settings,
+                    request_options={"timeout": 150}
+                )
+                return {"status": "success", "data": res.text}
+            except Exception as e:
+                # Pro 失敗或逾時，自動轉入 Flash 備援
+                fallback_header = "⚠️ [系統提示：Pro 模式分析超時或發生錯誤，已自動啟用 Flash 備援模型進行分析]\n\n"
+                try:
+                    m_flash = genai.GenerativeModel("gemini-3.1-flash-lite-preview")
+                    res_flash = m_flash.generate_content(
+                        prompt,
+                        generation_config={"temperature": 0},
+                        safety_settings=safety_settings,
+                        request_options={"timeout": 60}
+                    )
+                    return {"status": "success", "data": fallback_header + res_flash.text}
+                except Exception as inner_e:
+                    return {"status": "error", "message": f"分析失敗 (Pro & Flash 均異常): {inner_e}"}
+    except Exception as e: return {"status": "error", "message": str(e)}
 
 if __name__ == "__main__":
     import uvicorn

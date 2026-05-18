@@ -108,6 +108,11 @@
         <h1>Cisco PKA 提取器</h1>
         <div class="controls">
             <input type="file" id="fileInput">
+            <select id="modelSelect" style="padding: 10px; border-radius: 6px; border: 1px solid #ccc; font-weight: 600; background: white; cursor: pointer;">
+                <option value="auto">智能雙階段模式 (Pro 優先 + Flash 備援)</option>
+                <option value="pro">Pro 模式 (最精準 / 適合複雜作業)</option>
+                <option value="flash">Flash 模式 (極速 / 適合簡單作業)</option>
+            </select>
             <button id="btnAnalyze" onclick="startAnalyze()">分析檔案</button>
             <button id="btnDownload" onclick="downloadTxt()">下載配置 (answer.txt)</button>
         </div>
@@ -136,8 +141,10 @@
 
             if (!fileEl.files[0]) return alert("請先選擇 PKA 檔案！");
 
+            const modelSelect = document.getElementById('modelSelect');
             const formData = new FormData();
             formData.append('file', fileEl.files[0]);
+            formData.append('model_choice', modelSelect.value);
 
             // UI 初始化
             loadEl.style.display = "block";

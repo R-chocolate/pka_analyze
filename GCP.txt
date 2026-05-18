@@ -1,0 +1,30 @@
+====================================================================
+               Cisco PKA 分析器 常用指令懶人包
+====================================================================
+
+一、 雲端 GCP 部署指令 (Cloud Run)
+--------------------------------------------------------------------
+# 1. 部署/更新後端服務到 Cloud Run
+gcloud run deploy pka-analyze --source . --project=gen-lang-client-0233944575 --region=asia-east1 --allow-unauthenticated
+
+# 2. 設定終端機連結到指定 GCP 專案 (切換專案)
+gcloud config set project gen-lang-client-0233944575
+
+# 3. 登入/驗證您的 GCP 帳戶 (如果憑證過期或第一次使用時)
+gcloud auth login
+
+
+二、 GitHub 版本控制與推播指令 (Git)
+--------------------------------------------------------------------
+# 1. 查看目前檔案的修改狀態
+git status
+
+# 2. 將修改的程式碼檔案加入暫存區
+# (推薦加入關鍵程式檔案，避免將多餘的 .pka 大檔案推進去)
+git add main.py index.html decrypt_helper.py requirements.txt Dockerfile .gcloudignore .dockerignore GCP.txt
+
+# 3. 提交修改並填寫 commit 訊息
+git commit -m "feat: 新增雙階段模型分析與 Pro 安全設定解除，並新增解密輔助腳本"
+
+# 4. 推送到 GitHub 遠端倉庫 (您的 origin 是主分支 main)
+git push origin main

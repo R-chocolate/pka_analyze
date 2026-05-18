@@ -1,0 +1,16 @@
+.gcloudignore
+.git
+.gitignore
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.pka
+*.xml
+scratch/
+2.txt
+old_main.py
+local_test_v5.py
+debug_extract.py
+implementation_plan.md
+task.md
+walkthrough.md

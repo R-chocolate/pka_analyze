@@ -93,9 +93,9 @@ def extract_pka_data(xml_content):
     except: return None
 
 @app.post("/upload")
-async def analyze_pka(file: UploadFile = File(...), model_choice: str = Form("auto")):
+def analyze_pka(file: UploadFile = File(...), model_choice: str = Form("auto")):
     try:
-        pka_bytes = await file.read()
+        pka_bytes = file.file.read()
         content = decrypt_pkt(pka_bytes).decode('utf-8', errors='ignore')
         structured_data = extract_pka_data(content)
         if not structured_data: return {"status": "error", "message": "fail"}

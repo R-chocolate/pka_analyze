@@ -154,12 +154,20 @@
             resEl.innerText = "分析中...";
             resEl.style.color = "#d4d4d4";
 
+            let elapsed = 0;
+            const loaderTitle = loadEl.querySelector('div');
+            loaderTitle.innerText = "正在處理中... 已耗時 0 秒";
+            const timerId = setInterval(() => {
+                elapsed++;
+                loaderTitle.innerText = `正在處理中... 已耗時 ${elapsed} 秒`;
+            }, 1000);
+
             try {
                 // Cloud Run Service URL
                 const GCP_URL = 'https://pka-analyze-653034698950.asia-east1.run.app/upload';
 
                 const controller = new AbortController();
-                const timeoutId = setTimeout(() => controller.abort(), 180000); // 3 分鐘超時
+                const timeoutId = setTimeout(() => controller.abort(), 300000); // 5 分鐘超時 (300000ms)
 
                 const response = await fetch(GCP_URL, {
                     method: 'POST',
@@ -168,6 +176,7 @@
                 });
                 
                 clearTimeout(timeoutId);
+                clearInterval(timerId);
                 const json = await response.json();
 
                 if (json.status === "success") {
@@ -180,13 +189,15 @@
                     resEl.style.color = "#ff6b6b";
                 }
             } catch (err) {
+                clearInterval(timerId);
                 if (err.name === 'AbortError') {
-                    resEl.innerText = "錯誤: 請求超時 (超過 3 分鐘)。可能是檔案內容過多或網路連線不穩。";
+                    resEl.innerText = "錯誤: 請求超時 (超過 5 分鐘)。可能是檔案內容過多或網路連線不穩。";
                 } else {
                     resEl.innerText = "連線後端失敗: " + err;
                 }
                 resEl.style.color = "#ff6b6b";
             } finally {
+                clearInterval(timerId);
                 loadEl.style.display = "none";
                 analyzeBtn.disabled = false;
             }
